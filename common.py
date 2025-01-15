@@ -65,8 +65,8 @@ def get_default_args():
     default_args.mixup_mode = None  # how to apply mixup/cutmix ('batch', 'pair' or 'elem')
     default_args.mixup_smoothing = None  # label smoothing when using mixup
     default_args.init_fun = None  # parameters init function to be used
-    default_args.batch_size = None  # batch size for training
-    default_args.test_batch_size = None  # batch size for evaluation
+    default_args.batch_size = 32 #None  # batch size for training
+    default_args.test_batch_size =32 #None  # batch size for evaluation
     default_args.loss_type = None  # loss function to be used for training
     default_args.loss_args = None  # arguments to be passed to the loss init function
     default_args.optimizer_class = None  # class of the optimizer to use for training
@@ -78,10 +78,10 @@ def get_default_args():
     default_args.last_batch = None  # number of iterations to train for; use either this or epochs
     default_args.gradient_accumulation_steps = 1  # number of gradient accumulation steps
     default_args.mixed_precision = None  # whether to use accelerate's mixed precision
-    default_args.num_workers = 8  # number of workers to use for data loading
+    default_args.num_workers = 2 #8  # number of workers to use for data loading
     default_args.eval_points = 100  # number of short evaluations on the validation/test data while training
     default_args.eval_batches = 10  # number of batches to evaluate on each time while training
-    default_args.test_batches = 0  # number of batches for final test phase; 0 means full dataset
+    default_args.test_batches = 50 #0  # number of batches for final test phase; 0 means full dataset
     default_args.save_every = 10  # save model every N minutes
     default_args.use_wandb = False  # use weights and biases
     default_args.cpu = False  # Train on CPU for local debugging

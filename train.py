@@ -12,6 +12,7 @@ import wandb
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from omegaconf import OmegaConf
 from torch.utils.tensorboard import SummaryWriter
+from torchvision import datasets
 
 from common import INIT_NAME_MAP, LOSS_NAME_MAP, OPTIMIZER_NAME_MAP, SCHEDULER_NAME_MAP, get_default_args
 from data_utils.data import DATASETS_NAME_MAP
@@ -94,7 +95,24 @@ def setup_model(args, tc):
 
 def setup_data(args, tc):
     dataset_args = {} if args.dataset_args is None else args.dataset_args
+    # print("="*100)
+    # print(args.dataset)
+    # print(DATASETS_NAME_MAP)
+    # print(DATASETS_NAME_MAP[args.dataset])
+    # print("="*100)
+    args.dataset = 'tinyimagenet'
     train_data, train_eval_data, test_data = DATASETS_NAME_MAP[args.dataset](**dataset_args)
+    current_directory = os.getcwd()
+    #print("Current working directory is:", current_directory)
+    os.chdir("/home/jvincenti/D2DMoE/")
+    current_directory = os.getcwd()
+    #print("New working directory is:", current_directory)
+    base_directory = str(current_directory) + "/shared/sets/datasets/vision/TinyImageNet"
+    # /home/jvincenti/D2DMoE/shared/sets/datasets/vision/TinyImageNet/train
+    # train_dataset = datasets.ImageFolder(root=os.path.join(base_directory, "train"))
+    # test_dataset = datasets.ImageFolder(root=os.path.join(base_directory, "test"))
+    # val_dataset = datasets.ImageFolder(root=os.path.join(base_directory, "validation"))
+
     batch_size = args.batch_size
     if args.test_batch_size is None:
         test_batch_size = batch_size
@@ -166,6 +184,8 @@ def setup_files_and_logging(args, tc):
     if tc.accelerator.is_main_process:
         # log config
         logging.info(f'{run_name} args:\n{args}')
+        # Jort Set it to false.
+        # args.use_wandb = False
         if args.use_wandb:
             entity = os.environ['WANDB_ENTITY']
             project = os.environ['WANDB_PROJECT']

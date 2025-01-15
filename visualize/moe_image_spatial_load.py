@@ -224,6 +224,7 @@ def prepare_image_with_patch_selection(image, g_x, patch_size, normalization_tra
     return image.permute(1, 2, 0).numpy()
 
 
+
 def prepare_patch_selection_heatmap(image, g_x, patch_size):
     # g_x should be of size (seq_len) by now
     assert g_x.dim() == 1, f'{g_x.size()=}'

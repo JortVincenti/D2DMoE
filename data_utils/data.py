@@ -388,6 +388,9 @@ def get_tinyimagenet(normalization=None, variant=None):
     else:
         mean, std = (0.4802, 0.4481, 0.3975), (0.2302, 0.2265, 0.2262)
         normalize = transforms.Normalize(mean, std)
+    print()
+    print(variant)
+    print()
     if variant is None or variant == 'trivial_augment':
         transform_train = transforms.Compose([
             transforms.TrivialAugmentWide(),
@@ -405,15 +408,45 @@ def get_tinyimagenet(normalization=None, variant=None):
             transforms.ToTensor(),
             normalize,
         ])
-    transform_eval = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean, std),
-    ])
-    dataset_path = os.environ['TINYIMAGENET_PATH']
+    elif variant == 'deit3_rrc': # Jort added
+        # based on https://arxiv.org/pdf/2204.07118.pdf
+        # https://github.com/facebookresearch/deit/blob/main/augment.py
+        img_size = 224
+        transform_train = transforms.Compose([
+            RandomResizedCropAndInterpolation(img_size,
+                                              scale=(0.08, 1.0),
+                                              interpolation=InterpolationMode.BICUBIC),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomChoice([GrayScale(p=1.0),
+                                     Solarization(p=1.0),
+                                     GaussianBlur(p=1.0)]),
+            transforms.ColorJitter(0.3, 0.3, 0.3),
+            transforms.ToTensor(),
+            normalize,
+        ])
+        transform_eval = transforms.Compose([
+            transforms.Resize(img_size, interpolation=InterpolationMode.BICUBIC),
+            transforms.CenterCrop(img_size),
+            transforms.ToTensor(),
+            normalize,
+        ])
+        # transform_train = transforms.Compose([
+        #     transforms.RandomHorizontalFlip(),
+        #     transforms.RandomChoice([GrayScale(p=0.9),
+        #                                 Solarization(p=0.9),
+        #                                 GaussianBlur(p=0.9)]),
+        #     transforms.ToTensor(),
+        #     normalize,
+        # ])
+    # transform_eval = transforms.Compose([
+    #     transforms.ToTensor(),
+    #     transforms.Normalize(mean, std),
+    # ])
+    dataset_path = '/home/jvincenti/D2DMoE/shared/sets/datasets/vision/TinyImageNet' #os.environ['TINYIMAGENET_PATH']
     train_path = f'{dataset_path}/train'
     # TODO include the script that generates the symlinks somewhere
     # test_path = f'{dataset_path}/val'
-    test_path = f'{dataset_path}/val/images'
+    test_path = f'{dataset_path}/validation'
     train_data = datasets.ImageFolder(train_path, transform=transform_train)
     train_eval_data = datasets.ImageFolder(train_path, transform=transform_eval)
     test_data = datasets.ImageFolder(test_path, transform=transform_eval)

@@ -559,6 +559,7 @@ def save_state(accelerator: Accelerator, state_path: Path):
 
 def retrieve_final(args, run_name: str, device: Union[torch.device, str] = 'cpu'):
     final_path = args.runs_dir / run_name / 'final.pth'
+    print("Final Path:", final_path)
     if final_path.exists() and final_path.is_file():
         logging.info(f'Loading final state for {run_name} from {str(final_path)}')
         final_state = torch.load(final_path, map_location=device)
@@ -585,6 +586,7 @@ def load_model(args, exp_name: str, exp_id: str, device: Union[torch.device, str
     original_exp_name = exp_name
     original_exp_id = exp_id
     while exp_name is not None:
+
         state = retrieve_final(args, f'{exp_name}_{exp_id}', device)
         arg = state['args']
         model_arg = arg.model_args

@@ -25,6 +25,11 @@ def test_classification(accelerator: Accelerator,
     with torch.inference_mode():
         running_loss = 0.0
         correct, total = 0, 0
+        # Get the first batch
+        # first_batch = next(iter(data_loader))
+        # X, y = first_batch
+        # print(f"Features: {X.shape}")
+        # print(f"Labels: {y}")
         for batch, (X, y) in enumerate(data_loader):
             y_pred = model(X)
             y_pred, y = accelerator.gather_for_metrics((y_pred, y))
