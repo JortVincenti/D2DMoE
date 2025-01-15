@@ -23,4 +23,6 @@ Thumbs.db
 # Exclude pickle files
 *.plk
 
-D2DMoE/shared/sets/datasets/vision/TinyImageNet/
+
+D2DMoE/shared/*
+shared/*
