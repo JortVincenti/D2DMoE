@@ -1,0 +1,26 @@
+# Ignore Python bytecode files
+__pycache__/
+*.py[cod]
+
+# Ignore logs
+*.log
+
+# Ignore environment files
+.env
+*.venv
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore temporary files
+*.swp
+*.tmp
+
+# Exclude shell scripts
+*.sh
+
+# Exclude pickle files
+*.plk
+
+D2DMoE/shared/sets/datasets/vision/TinyImageNet/

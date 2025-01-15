@@ -1,0 +1,36 @@
+============================================================================================== 
+Warning! Mixing Conda and module environments may lead to corruption of the
+user environment. 
+We do not recommend users mixing those two environments unless absolutely
+necessary. Note that 
+SURF does not provide any support for Conda environment.
+For more information, please refer to our software policy page:
+https://servicedesk.surf.nl/wiki/display/WIKI/Software+policy+Snellius#SoftwarepolicySnellius-UseofAnacondaandMinicondaenvironmentsonSnellius 
+
+Remember that many packages have already been installed on the system and can
+be loaded using 
+the 'module load <package__name>' command. If you are uncertain if a package is
+already available 
+on the system, please use 'module avail' or 'module spider' to search for it.
+============================================================================================== 
+rm: refusing to remove '.' or '..' directory: skipping 'shared/results/effbench_logs/.'
+rm: refusing to remove '.' or '..' directory: skipping 'shared/results/effbench_logs/..'
+wandb: Appending key for api.wandb.ai to your netrc file: /home/jvincenti/.netrc
+Current directory is: /gpfs/home2/jvincenti/D2DMoE
+Exp names: ['TINYIMAGENET_PATH_var_d16_JFNMVVUK', 'TINYIMAGENET_PATH_mha_rep_distill_KKMAD6SH', 'TINYIMAGENET_PATH_enforce_sparsity_EOA7JTZC', 'TINYIMAGENET_PATH_dsti_expert_split_QIWBSI2D', 'TINYIMAGENET_PATH_dsti_router_AVZZU7ER']
+Display names: ['VAR', 'MHA distillation', 'Sparsity enforcement', 'DSTI expert split', 'DSTI']
+SLURM JIDs: ['9406072']
+
+JOB STATISTICS
+==============
+Job ID: 9406069
+Cluster: snellius
+User/Group: jvincenti/jvincenti
+State: COMPLETED (exit code 0)
+Nodes: 1
+Cores per node: 18
+CPU Utilized: 00:00:08
+CPU Efficiency: 2.22% of 00:06:00 core-walltime
+Job Wall-clock time: 00:00:20
+Memory Utilized: 2.24 MB
+Memory Efficiency: 0.00% of 120.00 GB
