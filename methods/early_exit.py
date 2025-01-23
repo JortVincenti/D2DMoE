@@ -10,7 +10,7 @@ from eval import benchmark_earlyexiting, evaluate_earlyexiting_classification, \
 from train import TrainingContext, setup_accelerator, setup_data, setup_optimization, \
     setup_files_and_logging, setup_state
 from utils import save_state, load_model, get_lrs, save_final, create_model, Mixup
-
+#import utils
 
 def distill_last(output):
     distillation_loss = 0.0

@@ -4,7 +4,7 @@
 #SBATCH --gpus=1
 #SBATCH --job-name=RunScript
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
+#SBATCH --cpus-per-task=9
 #SBATCH --time=00:10:00
 #SBATCH --output=jobs/run.out
 
@@ -25,7 +25,9 @@ source user.env
 eval "$(conda shell.bash hook)"
 conda activate effbench_env
 
+# pip install typed-argument-parser
+
 #pip install wandb
-wandb login 94c83d220ddc780120eaa22226adf6730f644c6c
+# wandb login 94c83d220ddc780120eaa22226adf6730f644c6c
 
 python -m scripts.$1

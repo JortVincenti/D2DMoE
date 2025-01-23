@@ -15,22 +15,41 @@ on the system, please use 'module avail' or 'module spider' to search for it.
 ============================================================================================== 
 rm: refusing to remove '.' or '..' directory: skipping 'shared/results/effbench_logs/.'
 rm: refusing to remove '.' or '..' directory: skipping 'shared/results/effbench_logs/..'
-wandb: Appending key for api.wandb.ai to your netrc file: /home/jvincenti/.netrc
-Current directory is: /gpfs/home2/jvincenti/D2DMoE
-Exp names: ['TINYIMAGENET_PATH_var_d16_JFNMVVUK', 'TINYIMAGENET_PATH_mha_rep_distill_KKMAD6SH', 'TINYIMAGENET_PATH_enforce_sparsity_EOA7JTZC', 'TINYIMAGENET_PATH_dsti_expert_split_QIWBSI2D', 'TINYIMAGENET_PATH_dsti_router_AVZZU7ER']
-Display names: ['VAR', 'MHA distillation', 'Sparsity enforcement', 'DSTI expert split', 'DSTI']
-SLURM JIDs: ['9406072']
+[dist initialize] env variable "RANK" is not set, use cuda:0 as the device
+[01-22 22:02:13] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
+[01-22 22:02:13] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
+[01-22 22:02:13] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
+[01-22 22:02:13] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
+[01-22 22:02:13] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[01-22 22:02:13] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[01-22 22:02:13] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[01-22 22:02:13] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[01-22 22:02:13] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[01-22 22:02:13] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[01-22 22:02:13] (oE/scripts/d2dmoe_var.py, line 177)=> base_run_name TINYIMAGENET_PATH_var_d16_PP6P6M3T_1
+[01-22 22:02:13] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[01-22 22:02:13] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[01-22 22:02:13] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[01-22 22:02:13] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[01-22 22:02:13] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[01-22 22:02:13] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[01-22 22:02:13] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[01-22 22:02:13] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[01-22 22:02:13] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[01-22 22:02:13] (oE/scripts/d2dmoe_var.py, line 352)=> Exp names: ['TINYIMAGENET_PATH_var_d16_PP6P6M3T', 'TINYIMAGENET_PATH_mha_rep_distill_VQFLRXEN', 'TINYIMAGENET_PATH_enforce_sparsity_T57UNALZ', 'TINYIMAGENET_PATH_dsti_expert_split_HFNATFTN', 'TINYIMAGENET_PATH_dsti_router_A2ZQDUP4']
+[01-22 22:02:13] (oE/scripts/d2dmoe_var.py, line 353)=> Display names: ['VAR', 'MHA distillation', 'Sparsity enforcement', 'DSTI expert split', 'DSTI']
+[01-22 22:02:13] (oE/scripts/d2dmoe_var.py, line 354)=> SLURM JIDs: ['9554921']
 
 JOB STATISTICS
 ==============
-Job ID: 9406069
+Job ID: 9554908
 Cluster: snellius
 User/Group: jvincenti/jvincenti
 State: COMPLETED (exit code 0)
 Nodes: 1
 Cores per node: 18
-CPU Utilized: 00:00:08
-CPU Efficiency: 2.22% of 00:06:00 core-walltime
-Job Wall-clock time: 00:00:20
-Memory Utilized: 2.24 MB
+CPU Utilized: 00:00:10
+CPU Efficiency: 1.92% of 00:08:42 core-walltime
+Job Wall-clock time: 00:00:29
+Memory Utilized: 2.22 MB
 Memory Efficiency: 0.00% of 120.00 GB

@@ -13,6 +13,7 @@ from methods.dynamic_sparsification.sparse_finetuning import square_hoyer
 from train import TrainingContext, setup_accelerator, setup_data, setup_optimization, setup_files_and_logging, \
     setup_state, in_training_eval, final_eval
 from utils import load_model, get_module_by_name, add_save_activations_hook, save_state, get_lrs, Mixup
+from utils_var import arg_util
 
 
 class ReplaceModulesTrainingContext(TrainingContext):
@@ -203,6 +204,7 @@ def train(args):
         handlers=[logging.StreamHandler()],
         force=True,
     )
+    args: arg_util.Args = arg_util.init_dist_and_get_args(args)
     logging.info('Configured logging')
     tc = ReplaceModulesTrainingContext()
     setup_accelerator(args, tc)

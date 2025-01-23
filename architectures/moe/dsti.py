@@ -97,10 +97,26 @@ def replace_mha_projections(original_model: nn.Module,
                             mlp_type: str = 'simple',
                             ):
     original_model.eval()
+    print()
+    print(dir(original_model.module))
+    print("Annotations:", original_model.__annotations__)
+    print(f"input_size: {getattr(original_model, 'input_size', None)}")
+    print(f"num_classes: {getattr(original_model, 'num_classes', None)}")
+    print(f"depth: {getattr(original_model, 'depth', None)}")
+    print(f"lvl_1L: {getattr(original_model, 'lvl_1L', None)}")
+    for i, block in enumerate(original_model.module.blocks):
+        if hasattr(block, 'attn'):
+            print(f"Block {i} o_proj: {getattr(block.attn, 'o_proj', None)}")
+            print(f"Block {i} q_proj: {getattr(block.attn, 'q_proj', None)}")
+            print(f"Block {i} k_proj: {getattr(block.attn, 'k_proj', None)}")
+            print(f"Block {i} v_proj: {getattr(block.attn, 'v_proj', None)}")
+    print()
+
     if isinstance(original_model, GPT):
         d = original_model.config.n_embd
     else:
-        d = original_model.hidden_dim
+            # d = original_model.hidden_dim Jort: this is not correct
+            d = original_model.module.C
 
     attention_dim = round(flops_factor * (d ** 2 + d) / (2 * d + 1))
     if dropout == 'same':
@@ -111,8 +127,7 @@ def replace_mha_projections(original_model: nn.Module,
     modules_to_replace = []
     if o_proj:
         modules_to_replace += find_module_names(original_model,
-                                                create_attention_projection_filter_condition(
-                                                    'o_proj'))
+                                                create_attention_projection_filter_condition('o_proj'))
     if q_proj:
         modules_to_replace += find_module_names(original_model,
                                                 create_attention_projection_filter_condition('q_proj'))

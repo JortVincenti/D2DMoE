@@ -21,13 +21,13 @@ from accelerate.state import AcceleratorState
 from accelerate.utils import PrepareForLaunch, patch_environment
 from fvcore.nn import FlopCountAnalysis
 from fvcore.nn.jit_handles import elementwise_flop_counter, get_shape
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 from tabulate import tabulate
 from torch import nn
 from triton import language as tl
 
 from data_utils.data import DATASETS_NAME_MAP
-
+from utils_var import arg_util
 
 # mixup code from:
 # https://github.com/huggingface/pytorch-image-models/blob/624266148d8fa5ddb22a6f5e523a53aaf0e8a9eb/timm/data/mixup.py#L90
@@ -518,13 +518,14 @@ def make_hash_sha256(o: Union[Tuple, List, Dict, Set, FrozenSet]) -> str:
     return base64.b32encode(hasher.digest()).decode()
 
 
-def generate_run_name(args) -> Tuple[str, str]:
+def generate_run_name(args: DictConfig) -> Tuple[str, str]:
     # Properties from the config that are NOT to be included into hashing.
     # as a general rule, include those that do not affect training to avoid retraining models
     # (warning! these might affect evaluation!)
     omitted_keys = ['cpu', 'dsti_expert_selection_mode', 'dsti_tau_to_eval', 'eval_batches',
                     'eval_points', 'eval_thresholds', 'exp_id', 'k_to_eval', 'num_workers', 'runs_dir', 'save_every',
                     'save_test_activations', 'test_batch_size', 'test_batches', 'use_wandb']
+    args = arg_util.init_dist_and_get_args(args)
     args_dict = OmegaConf.to_container(args, resolve=True)
     hashed_flags = {k: v for k, v in args_dict.items() if k not in omitted_keys and v is not None}
     short_hash = make_hash_sha256(hashed_flags)[:8]
@@ -558,7 +559,8 @@ def save_state(accelerator: Accelerator, state_path: Path):
 
 
 def retrieve_final(args, run_name: str, device: Union[torch.device, str] = 'cpu'):
-    final_path = args.runs_dir / run_name / 'final.pth'
+    final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_var_d16_GCJYOT4E_1/final.pth')
+    #final_path = args.runs_dir / run_name / 'final.pth'
     print("Final Path:", final_path)
     if final_path.exists() and final_path.is_file():
         logging.info(f'Loading final state for {run_name} from {str(final_path)}')
@@ -575,6 +577,8 @@ def save_final(_args, final_path, final_results):
 
 def create_model(model_class, model_args):
     from common import MODEL_NAME_MAP
+    if model_args is None:
+        model_args = {}
     return MODEL_NAME_MAP[model_class](**model_args)
 
 

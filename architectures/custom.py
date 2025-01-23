@@ -5,7 +5,7 @@ from torch import nn
 
 from architectures.gpt import CausalSelfAttention
 from utils import find_module_names, get_module_by_name, set_module_by_name, get_module_name, get_parent_module_name
-
+# import utils
 
 class CustomMultiheadAttention(nn.Module):
     def __init__(self, embed_dim, num_heads, dropout_p=0.0):

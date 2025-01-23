@@ -13,6 +13,9 @@ from torchvision.models.vision_transformer import MLP
 from architectures.early_exits.pbee import PBEE
 from architectures.vit import MLP as CustomMLP
 from utils import flop_count, get_module_by_name, remove_hooks, find_module_names, add_save_activations_hook
+#import utils
+
+from trainer import VARTrainer
 
 
 def test_classification(accelerator: Accelerator,
@@ -20,32 +23,35 @@ def test_classification(accelerator: Accelerator,
                         data_loader: torch.utils.data.DataLoader,
                         criterion_class: torch.nn.Module,
                         batches: int = 0) -> Tuple[float, float]:
-    criterion = criterion_class(reduction='sum')
-    model.eval()
-    with torch.inference_mode():
-        running_loss = 0.0
-        correct, total = 0, 0
-        # Get the first batch
-        # first_batch = next(iter(data_loader))
-        # X, y = first_batch
-        # print(f"Features: {X.shape}")
-        # print(f"Labels: {y}")
-        for batch, (X, y) in enumerate(data_loader):
-            y_pred = model(X)
-            y_pred, y = accelerator.gather_for_metrics((y_pred, y))
-            y_pred_max = y_pred.argmax(dim=-1)
-            if len(y_pred.shape) == 3:
-                # For CE loss on sequences
-                y_pred = y_pred.transpose(1, 2)
-            loss = criterion(y_pred, y)
-            running_loss += loss.item()
-            correct += (y_pred_max == y).sum().item()
-            # Again account for multi-dimensional targets
-            total += y.numel()
-            if batches > 0 and batch == batches - 1:
-                break
+    if hasattr(model, "patch_nums"):
+        L_mean, L_tail, acc_mean, acc_tail, total, elapsed_time = model.eval_ep(data_loader)
+        mean_loss = L_mean
+        accuracy = acc_mean
+    else:
+        criterion = criterion_class(reduction='sum')
+        model.eval()
+        with torch.inference_mode():
+            running_loss = 0.0
+            correct, total = 0, 0
+            for batch, (X, y) in enumerate(data_loader):
+                # Jort to do better.
+                y_pred = model(X)
+                y_pred, y = accelerator.gather_for_metrics((y_pred, y))
+                y_pred_max = y_pred.argmax(dim=-1)
+                if len(y_pred.shape) == 3:
+                    # For CE loss on sequences
+                    y_pred = y_pred.transpose(1, 2)
+                loss = criterion(y_pred, y)
+                running_loss += loss.item()
+                correct += (y_pred_max == y).sum().item()
+                # Again account for multi-dimensional targets
+                total += y.numel()
+                if batches > 0 and batch == batches - 1:
+                    break
+        mean_loss = running_loss / total
+        accuracy = correct / total
     # loss, acc
-    return running_loss / total, correct / total
+    return mean_loss, accuracy
 
 
 def get_preds(accelerator: Accelerator,
@@ -94,31 +100,31 @@ def get_preds_earlyexiting(accelerator: Accelerator,
     return batch_head_preds, batch_labels
 
 
-# def get_preds_moe(accelerator: Accelerator,
-#                   model: torch.nn.Module,
-#                   data_loader: torch.utils.data.DataLoader,
-#                   batches: int = 0):
-#     model.eval()
-#     batch_outputs = []
-#     batch_labels = []
-#     batch_gating_data = defaultdict(list)
-#     with torch.inference_mode():
-#         for batch, (X, y) in enumerate(data_loader):
-#             output, gating_data = model(X, return_gating_data=True)
-#             # we select only the final routing decisions
-#             gating_data = {k: v[0] for k, v in gating_data.items()}
-#             output, y, gating_data = accelerator.gather_for_metrics((output, y, gating_data))
-#             batch_outputs.append(output.detach().cpu())
-#             batch_labels.append(y.detach().cpu())
-#             for k, v in gating_data.items():
-#                 batch_gating_data[k].append(v.detach().cpu())
-#             if batches > 0 and batch == batches - 1:
-#                 break
-#     batch_outputs = torch.cat(batch_outputs)
-#     batch_labels = torch.cat(batch_labels)
-#     for k in batch_gating_data.keys():
-#         batch_gating_data[k] = torch.cat(batch_gating_data[k])
-#     return batch_outputs, batch_labels, batch_gating_data
+def get_preds_moe(accelerator: Accelerator,
+                  model: torch.nn.Module,
+                  data_loader: torch.utils.data.DataLoader,
+                  batches: int = 0):
+    model.eval()
+    batch_outputs = []
+    batch_labels = []
+    batch_gating_data = defaultdict(list)
+    with torch.inference_mode():
+        for batch, (X, y) in enumerate(data_loader):
+            output, gating_data = model(X, return_gating_data=True)
+            # we select only the final routing decisions
+            gating_data = {k: v[0] for k, v in gating_data.items()}
+            output, y, gating_data = accelerator.gather_for_metrics((output, y, gating_data))
+            batch_outputs.append(output.detach().cpu())
+            batch_labels.append(y.detach().cpu())
+            for k, v in gating_data.items():
+                batch_gating_data[k].append(v.detach().cpu())
+            if batches > 0 and batch == batches - 1:
+                break
+    batch_outputs = torch.cat(batch_outputs)
+    batch_labels = torch.cat(batch_labels)
+    for k in batch_gating_data.keys():
+        batch_gating_data[k] = torch.cat(batch_gating_data[k])
+    return batch_outputs, batch_labels, batch_gating_data
 
 
 def get_preds_avit(accelerator: Accelerator,
@@ -485,17 +491,17 @@ def benchmark_with_sample(model: torch.nn.Module,
     with torch.inference_mode():
         model_costs = flop_count(model, (sample,))
         param_count = parameter_count(model)
-    logging.info(f'Ops by operator:\n{model_costs.by_operator()}')
-    logging.info(f'Ops by module:\n{flop_count_table(model_costs, max_depth=7)}')
-    logging.info(f'Total ops: {model_costs.total()}')
-    unsupported = model_costs.unsupported_ops()
-    if len(unsupported) > 0:
-        for k, v in unsupported.items():
-            logging.warning(f'Unsupported op: {k} (occurrences: {v})')
-    uncalled = model_costs.uncalled_modules()
-    if len(uncalled) > 0:
-        for m in uncalled:
-            logging.warning(f'Uncalled module: {m}')
+    # logging.info(f'Ops by operator:\n{model_costs.by_operator()}')
+    # logging.info(f'Ops by module:\n{flop_count_table(model_costs, max_depth=7)}')
+    # logging.info(f'Total ops: {model_costs.total()}')
+    # unsupported = model_costs.unsupported_ops()
+    # if len(unsupported) > 0:
+    #     for k, v in unsupported.items():
+    #         logging.warning(f'Unsupported op: {k} (occurrences: {v})')
+    # uncalled = model_costs.uncalled_modules()
+    # if len(uncalled) > 0:
+    #     for m in uncalled:
+    #         logging.warning(f'Uncalled module: {m}')
     return model_costs, param_count
 
 

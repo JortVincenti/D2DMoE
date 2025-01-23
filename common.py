@@ -9,6 +9,16 @@ from transformers.optimization import (
     get_inverse_sqrt_schedule,
     get_linear_schedule_with_warmup,
 )
+import sys
+import json
+import os
+import random
+import re
+import subprocess
+import sys
+import time
+from collections import OrderedDict
+from typing import Optional, Union
 
 from architectures.avit import AvitWrapper
 from architectures.early_exits.gpf import GPF
@@ -24,10 +34,12 @@ from architectures.pretrained import (
     get_efficientnet_v2_s,
     get_swin_v2_s,
     get_vit_b_16,
+    get_var_d16,
 )
 from architectures.resnets import ResNet18, ResNet34, ResNet50, ResNet101, ResNet152
 from architectures.vgg import VGG16BN
 from architectures.vit import VisionTransformer
+from architectures.var import VAR
 
 
 def default_init(model):
@@ -58,15 +70,15 @@ def get_default_args():
     default_args.runs_dir = "runs"  # directory to save the results to
     default_args.model_class = None  # class of the model to train
     default_args.model_args = None  # arguments to be passed to the model init function
-    default_args.dataset = None  # dataset to train on
+    default_args.dataset = 'shared/sets/datasets/vision/TinyImageNet'  # dataset to train on
     default_args.dataset_args = None  # customization arguments for the dataset
     default_args.mixup_alpha = None  # alpha parameter for mixup's beta distribution
     default_args.cutmix_alpha = None  # alpha parameter for cutmix's beta distribution
     default_args.mixup_mode = None  # how to apply mixup/cutmix ('batch', 'pair' or 'elem')
     default_args.mixup_smoothing = None  # label smoothing when using mixup
     default_args.init_fun = None  # parameters init function to be used
-    default_args.batch_size = 32 #None  # batch size for training
-    default_args.test_batch_size =32 #None  # batch size for evaluation
+    default_args.batch_size =  None  # batch size for training
+    default_args.test_batch_size = None  # batch size for evaluation
     default_args.loss_type = None  # loss function to be used for training
     default_args.loss_args = None  # arguments to be passed to the loss init function
     default_args.optimizer_class = None  # class of the optimizer to use for training
@@ -218,5 +230,6 @@ MODEL_NAME_MAP = {
     'distilbert': get_distilbert,
     'roberta': get_roberta,
     'gpt2': get_gpt2,
-    'gemma': get_gemma
+    'gemma': get_gemma,
+    'var_d16': get_var_d16,
 }

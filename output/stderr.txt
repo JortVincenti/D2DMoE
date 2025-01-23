@@ -1,0 +1,153 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/_submit.py", line 11, in <module>
+    submitit_main()
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/submission.py", line 76, in submitit_main
+    process_job(args.folder)
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/submission.py", line 69, in process_job
+    raise error
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/submission.py", line 55, in process_job
+    result = delayed.result()
+             ^^^^^^^^^^^^^^^^
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/utils.py", line 137, in result
+    self._result = self.function(*self.args, **self.kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/gpfs/home2/jvincenti/D2DMoE/train.py", line 563, in train
+    args: arg_util.Args = arg_util.init_dist_and_get_args()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/gpfs/home2/jvincenti/D2DMoE/utils_var/arg_util.py", line 362, in init_dist_and_get_args
+    misc.set_tf32(args.tf32)
+    ^^^^^^^^^^^^^
+AttributeError: module 'utils_var.misc' has no attribute 'set_tf32'
+
+
+
+
+
+
+
+=======================================================   RESTART [01-17 18:04:32]   =======================================================
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/_submit.py", line 11, in <module>
+    submitit_main()
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/submission.py", line 76, in submitit_main
+    process_job(args.folder)
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/submission.py", line 69, in process_job
+    raise error
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/submission.py", line 55, in process_job
+    result = delayed.result()
+             ^^^^^^^^^^^^^^^^
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/utils.py", line 137, in result
+    self._result = self.function(*self.args, **self.kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/gpfs/home2/jvincenti/D2DMoE/train.py", line 563, in train
+    args: arg_util.Args = arg_util.init_dist_and_get_args()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/gpfs/home2/jvincenti/D2DMoE/utils_var/arg_util.py", line 365, in init_dist_and_get_args
+    args.device = misc.get_device()
+                  ^^^^^^^^^^^^^^^
+AttributeError: module 'utils_var.misc' has no attribute 'get_device'
+
+
+
+
+
+
+
+=======================================================   RESTART [01-17 18:09:34]   =======================================================
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/_submit.py", line 11, in <module>
+    submitit_main()
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/submission.py", line 76, in submitit_main
+    process_job(args.folder)
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/submission.py", line 69, in process_job
+    raise error
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/submission.py", line 55, in process_job
+    result = delayed.result()
+             ^^^^^^^^^^^^^^^^
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/utils.py", line 137, in result
+    self._result = self.function(*self.args, **self.kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/gpfs/home2/jvincenti/D2DMoE/train.py", line 563, in train
+    args: arg_util.Args = arg_util.init_dist_and_get_args()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/gpfs/home2/jvincenti/D2DMoE/utils_var/arg_util.py", line 365, in init_dist_and_get_args
+    args.device = dist.get_device()
+    ^^^^^^^^^^^
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/omegaconf/dictconfig.py", line 337, in __setattr__
+    raise e
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/omegaconf/dictconfig.py", line 334, in __setattr__
+    self.__set_impl(key, value)
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/omegaconf/dictconfig.py", line 318, in __set_impl
+    self._set_item_impl(key, value)
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/omegaconf/basecontainer.py", line 620, in _set_item_impl
+    self._wrap_value_and_set(key, value, target_type_hint)
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/omegaconf/basecontainer.py", line 636, in _wrap_value_and_set
+    self._format_and_raise(key=key, value=val, cause=e)
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/omegaconf/base.py", line 231, in _format_and_raise
+    format_and_raise(
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/omegaconf/_utils.py", line 899, in format_and_raise
+    _raise(ex, cause)
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/omegaconf/_utils.py", line 797, in _raise
+    raise ex.with_traceback(sys.exc_info()[2])  # set env var OC_CAUSE=1 for full trace
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/omegaconf/basecontainer.py", line 628, in _wrap_value_and_set
+    wrapped = _maybe_wrap(
+              ^^^^^^^^^^^^
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/omegaconf/omegaconf.py", line 1105, in _maybe_wrap
+    return _node_wrap(
+           ^^^^^^^^^^^
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/omegaconf/omegaconf.py", line 1045, in _node_wrap
+    node = AnyNode(value=value, key=key, parent=parent)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/omegaconf/nodes.py", line 135, in __init__
+    super().__init__(
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/omegaconf/nodes.py", line 29, in __init__
+    self._set_value(value)  # lgtm [py/init-calls-subclass]
+    ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/omegaconf/nodes.py", line 46, in _set_value
+    self._val = self.validate_and_convert(value)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/omegaconf/nodes.py", line 76, in validate_and_convert
+    return self._validate_and_convert_impl(value)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/omegaconf/nodes.py", line 154, in _validate_and_convert_impl
+    raise UnsupportedValueType(
+omegaconf.errors.UnsupportedValueType: Value 'device' is not a supported primitive type
+    full_key: device
+    object_type=dict
+
+
+
+
+
+
+
+=======================================================   RESTART [01-17 18:29:12]   =======================================================
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/_submit.py", line 11, in <module>
+    submitit_main()
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/submission.py", line 76, in submitit_main
+    process_job(args.folder)
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/submission.py", line 69, in process_job
+    raise error
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/submission.py", line 55, in process_job
+    result = delayed.result()
+             ^^^^^^^^^^^^^^^^
+  File "/home/jvincenti/.conda/envs/effbench_env/lib/python3.12/site-packages/submitit/core/utils.py", line 137, in result
+    self._result = self.function(*self.args, **self.kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/gpfs/home2/jvincenti/D2DMoE/train.py", line 563, in train
+    args: arg_util.Args = arg_util.init_dist_and_get_args()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/gpfs/home2/jvincenti/D2DMoE/utils_var/arg_util.py", line 372, in init_dist_and_get_args
+    args.patch_nums = tuple(map(int, args.pn.replace('-', '_').split('_')))
+                                     ^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'replace'
