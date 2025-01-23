@@ -22,6 +22,7 @@ Thumbs.db
 
 # Exclude pickle files
 *.plk
+*.pth
 
 
 D2DMoE/shared/*
