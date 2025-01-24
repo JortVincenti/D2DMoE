@@ -11,10 +11,10 @@ from architectures.moe.dsti import replace_mha_projections, SubstitutionMLP, fin
 from common import get_default_args, INIT_NAME_MAP, LOSS_NAME_MAP
 from methods.dynamic_sparsification.sparse_finetuning import square_hoyer
 from train import TrainingContext, setup_accelerator, setup_data, setup_optimization, setup_files_and_logging, \
-    setup_state, in_training_eval, final_eval
+    setup_state, in_training_eval, final_eval, make_vae
 from utils import load_model, get_module_by_name, add_save_activations_hook, save_state, get_lrs, Mixup
 from utils_var import arg_util
-
+from architectures.quant import VectorQuantizer2
 
 class ReplaceModulesTrainingContext(TrainingContext):
     base_model: torch.nn.Module = None
@@ -83,7 +83,7 @@ def training_loop(args, tc):
         mixup_smoothing = 0.1 if args.mixup_smoothing is None else args.mixup_smoothing
         mixup_fn = Mixup(
             mixup_alpha=args.mixup_alpha, cutmix_alpha=args.cutmix_alpha, mode=mixup_mode,
-            label_smoothing=mixup_smoothing, num_classes=unwrapped_model.number_of_classes)
+            label_smoothing=mixup_smoothing, num_classes=1000) # Jort: Hard coded 1000 classes
     else:
         mixup_fn = None
     criterion = tc.distill_criterion_type()
@@ -109,9 +109,34 @@ def training_loop(args, tc):
         # training step
         # (save inputs and outputs with hooks)
         set_for_distillation_iteration(tc)
+
+        print("*"*100)
+        print(X.shape, y.shape)
+        print(X)
+        print(y)
+        print("*"*100)
+        
+        quantize_local = VectorQuantizer2(
+            vocab_size=tc.model_vae.vocab_size, Cvae=32, using_znorm=False, beta=0.25,
+            default_qresi_counts=0, v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16), quant_resi=0.5, share_quant_resi=4,
+        )
+
         with torch.no_grad():
-            tc.base_model(X)
+
+            B, V = y.shape[0], tc.model_vae.vocab_size
+            X = X.to(dist.get_device(), non_blocking=True)
+            label_B = y.to(dist.get_device(), non_blocking=True)
+            
+            gt_idx_Bl: List[ITen] = tc.model_vae.img_to_idxBl(X)
+            gt_BL = torch.cat(gt_idx_Bl, dim=1)
+            x_BLCv_wo_first_l: Ten = quantize_local.idxBl_to_var_input(gt_idx_Bl)
+            
+            # self.var_wo_ddp.forward
+            # logits_BLV = self.var_wo_ddp(label_B, x_BLCv_wo_first_l)
+            
+            tc.base_model(label_B, x_BLCv_wo_first_l)
         # iterate over each layer, calculate loss for each ACM individually
+        ADd
         module_losses = []
         for module_name in tc.replaced_module_names:
             module = tc.replacement_modules[module_name]
@@ -214,6 +239,10 @@ def train(args):
     setup_for_training(args, tc)
     setup_optimization(args, tc)
     setup_state(tc)
+    
+    make_vae(args, tc)
+    print("tc.model_vae", tc.model_vae)
+
     training_loop(args, tc)
     final_eval(args, tc)
 

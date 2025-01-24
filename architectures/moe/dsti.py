@@ -13,6 +13,7 @@ from architectures.custom import create_attention_projection_filter_condition, C
 from architectures.vit import MLP
 from architectures.gpt import MLP as GPTMLP, GPT
 from utils import find_module_names, get_module_by_name, set_module_by_name, get_module_name, get_parent_module_name
+from architectures.basic_var import SelfAttention
 
 
 class SubstitutionMLP(torch.nn.Module):
@@ -97,20 +98,24 @@ def replace_mha_projections(original_model: nn.Module,
                             mlp_type: str = 'simple',
                             ):
     original_model.eval()
-    print()
-    print(dir(original_model.module))
-    print("Annotations:", original_model.__annotations__)
-    print(f"input_size: {getattr(original_model, 'input_size', None)}")
-    print(f"num_classes: {getattr(original_model, 'num_classes', None)}")
-    print(f"depth: {getattr(original_model, 'depth', None)}")
-    print(f"lvl_1L: {getattr(original_model, 'lvl_1L', None)}")
-    for i, block in enumerate(original_model.module.blocks):
-        if hasattr(block, 'attn'):
-            print(f"Block {i} o_proj: {getattr(block.attn, 'o_proj', None)}")
-            print(f"Block {i} q_proj: {getattr(block.attn, 'q_proj', None)}")
-            print(f"Block {i} k_proj: {getattr(block.attn, 'k_proj', None)}")
-            print(f"Block {i} v_proj: {getattr(block.attn, 'v_proj', None)}")
-    print()
+    # print()
+    # print(dir(original_model.module))
+    # print("Annotations:", original_model.__annotations__)
+    # print(f"input_size: {getattr(original_model, 'input_size', None)}")
+    # print(f"num_classes: {getattr(original_model, 'num_classes', None)}")
+    # print(f"depth: {getattr(original_model, 'depth', None)}")
+    # print(f"lvl_1L: {getattr(original_model, 'lvl_1L', None)}")
+    # for i, block in enumerate(original_model.module.blocks):
+    #     if hasattr(block, 'attn'):
+    #         print(f"Block {i} attn module structure: {dir(block.attn)}")
+    #         print(f"Block {i} submodules in attn: {list(block.attn.named_children())}")
+    # for i, block in enumerate(original_model.module.blocks):
+    #     if hasattr(block, 'attn'):
+    #         print(f"Block {i} o_proj: {getattr(block.attn, 'o_proj', None)}")
+    #         print(f"Block {i} q_proj: {getattr(block.attn, 'q_proj', None)}")
+    #         print(f"Block {i} k_proj: {getattr(block.attn, 'k_proj', None)}")
+    #         print(f"Block {i} v_proj: {getattr(block.attn, 'v_proj', None)}")
+    #print()
 
     if isinstance(original_model, GPT):
         d = original_model.config.n_embd
@@ -125,18 +130,26 @@ def replace_mha_projections(original_model: nn.Module,
                  f' (activation: {activation}, bias:{bias}, dropout: {dropout})')
     model = deepcopy(original_model)
     modules_to_replace = []
+    # if o_proj:
+    #     modules_to_replace += find_module_names(original_model,
+    #                                             create_attention_projection_filter_condition('o_proj'))
+    # if q_proj:
+    #     modules_to_replace += find_module_names(original_model,
+    #                                             create_attention_projection_filter_condition('q_proj'))
+    # if k_proj:
+    #     modules_to_replace += find_module_names(original_model,
+    #                                             create_attention_projection_filter_condition('k_proj'))
+    # if v_proj:
+    #     modules_to_replace += find_module_names(original_model,
+    #                                             create_attention_projection_filter_condition('v_proj'))
+    # print(o_proj, q_proj, k_proj, v_proj)
+    # print(find_module_names(original_model, create_attention_projection_filter_condition('proj')))
+    # print(find_module_names(original_model, create_attention_projection_filter_condition('mat_qkv')))
     if o_proj:
-        modules_to_replace += find_module_names(original_model,
-                                                create_attention_projection_filter_condition('o_proj'))
-    if q_proj:
-        modules_to_replace += find_module_names(original_model,
-                                                create_attention_projection_filter_condition('q_proj'))
-    if k_proj:
-        modules_to_replace += find_module_names(original_model,
-                                                create_attention_projection_filter_condition('k_proj'))
-    if v_proj:
-        modules_to_replace += find_module_names(original_model,
-                                                create_attention_projection_filter_condition('v_proj'))
+        modules_to_replace += find_module_names(original_model, create_attention_projection_filter_condition('proj'))
+    if q_proj and k_proj and v_proj:
+        modules_to_replace += find_module_names(original_model, create_attention_projection_filter_condition('mat_qkv'))
+        
     # use hooks to get an example input
     assert len(modules_to_replace) > 0, f'{modules_to_replace=}'
     # replace the selected layers
@@ -149,7 +162,7 @@ def replace_mha_projections(original_model: nn.Module,
                                              bias=bias,
                                              dropout=dropout)
         set_module_by_name(model, name, replacement)
-        logging.info(f'Substituting {name}')
+        logging.info(f'Substituting {name}') # with {mlp_type} MLP {replacement}')
     return model, modules_to_replace
 
 
@@ -173,9 +186,14 @@ def mha_gelu_activation_filter(model: nn.Module, m: nn.Module):
     grandparent_m_name = get_parent_module_name(parent_m_name)
     parent_module = get_module_by_name(model, parent_m_name)
     grandparent_module = get_module_by_name(model, grandparent_m_name)
+    # print("*"*50)
+    # print(f"m_name: {m_name}, parent_m_name: {parent_m_name}, grandparent_m_name: {grandparent_m_name}")
+    # print(f"m: {m}, parent_module: {parent_module}, grandparent_module: {grandparent_module}")
+    # print(isinstance(m, (nn.GELU, PytorchGELUTanh)), isinstance(parent_module, (MLP, TorchvisionMLP, SubstitutionMLP, GPTMLP, BertLayer, GemmaMLP)), isinstance(grandparent_module, (CustomMultiheadAttention, SelfAttention))) 
+    # print("*"*50)
     if isinstance(m, (nn.GELU, PytorchGELUTanh)) and isinstance(parent_module, (
     MLP, TorchvisionMLP, SubstitutionMLP, GPTMLP, BertLayer, GemmaMLP)) \
-            and isinstance(grandparent_module, CustomMultiheadAttention):
+            and isinstance(grandparent_module, (CustomMultiheadAttention, SelfAttention)): # Jort: To make sure that SelfAttention can be added instead of CustomMultiheadAttention
         return True
 
 

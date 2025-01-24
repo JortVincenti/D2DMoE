@@ -333,6 +333,16 @@ def setup_data(args, tc): # Jort: This should be correct!
  
 def setup_optimization(args, tc): # Jort: This should be roughly correct (tc.optimizer, tc.scheduler)!
     """Set up the optimizer and learning rate scheduler."""
+
+
+    # Create a full list of parameter names from the model
+    # all_params = set([name for name, _ in tc.model.named_parameters()])
+
+    # # Compute the parameters to freeze by subtracting the ones to unfreeze
+    # params_to_freeze = all_params - params_to_unfreeze
+    # names, paras, para_groups = filter_params(tc.model, nowd_keys=params_to_freeze)
+
+
     names, paras, para_groups = filter_params(tc.model, nowd_keys={
         'cls_token', 'start_token', 'task_token', 'cfg_uncond',
         'pos_embed', 'pos_1LC', 'pos_start', 'start_pos', 'lvl_embed',
@@ -340,6 +350,7 @@ def setup_optimization(args, tc): # Jort: This should be roughly correct (tc.opt
         'ada_gss', 'moe_bias',
         'scale_mul',
     })
+
     opt_clz = {
         'adam':  partial(torch.optim.AdamW, betas=(0.9, 0.95), fused=args.afuse),
         'adamw': partial(torch.optim.AdamW, betas=(0.9, 0.95), fused=args.afuse),
@@ -427,7 +438,7 @@ def setup_files_and_logging(args, tc): # Jort: This should be correct!
 
 
 def in_training_eval(args, tc):
-    raise NotImplementedError("Validation is not implemented yet.")
+
     """Perform evaluation during training at specific intervals."""
     if tc.state.current_batch in tc.eval_batch_list:
         if tc.accelerator.is_main_process:
@@ -495,14 +506,10 @@ def make_vae(args, tc):
         device=dist.get_device(), patch_nums=patch_nums,
         num_classes=1000, depth=16, shared_aln=args.saln, attn_l2_norm=args.anorm,
         flash_if_available=args.fuse, fused_if_available=args.fuse,
-        init_adaln=args.aln, init_adaln_gamma=args.alng, init_head=args.hd, init_std=args.ini,
+        init_adaln=args.aln, init_adaln_gamma=args.alng, init_head=args.hd,
     )
     
     vae_ckpt = 'vae_ch160v4096z32.pth'
-    if dist.is_local_master():
-        if not os.path.exists(vae_ckpt):
-            os.system(f'wget https://huggingface.co/FoundationVision/var/resolve/main/{vae_ckpt}')
-
     vae_local.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True)
     
     vae_local: VQVAE = compile_model(vae_local, args.vfast)

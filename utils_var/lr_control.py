@@ -102,7 +102,12 @@ def filter_params(model, nowd_keys=()) -> Tuple[
         dist.barrier()
         if dist.get_rank() == rk:
             print(f'[get_param_groups][rank{dist.get_rank()}] {type(model).__name__=} {count=}, {numel=}', flush=True, force=True)
-    print('')
-    
-    assert len(names_no_grad) == 0, f'[get_param_groups] names_no_grad = \n{pformat(names_no_grad, indent=2, width=240)}\n'
+    # print()
+    # print('Trainable paras', names)
+    # print('Frozen paras', names_no_grad)
+    # print()
+    #assert len(names_no_grad) == 0, f'[get_param_groups] names_no_grad = \n{pformat(names_no_grad, indent=2, width=240)}\n'
+    if len(names_no_grad) > 0:
+        print(f"Warning: Frozen parameters detected:\n{pformat(names_no_grad, indent=2, width=240)}")
+
     return names, paras, list(para_groups.values())

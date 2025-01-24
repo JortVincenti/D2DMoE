@@ -122,13 +122,23 @@ def simplify_mha(model):
         set_module_by_name(model, mha_name, simple_mha)
 
 
+# def create_attention_projection_filter_condition(projection_name: str = None):
+#     def filter_condition(model: nn.Module, m: nn.Module):
+#         m_name = get_module_name(model, m)
+#         parent_module = get_module_by_name(model, get_parent_module_name(m_name))
+#         if isinstance(m, nn.Linear) and isinstance(parent_module, CustomMultiheadAttention):
+#             if projection_name is not None and projection_name not in m_name:
+#                 return False
+#             return True
+
+#     return filter_condition
+
 def create_attention_projection_filter_condition(projection_name: str = None):
     def filter_condition(model: nn.Module, m: nn.Module):
         m_name = get_module_name(model, m)
         parent_module = get_module_by_name(model, get_parent_module_name(m_name))
-        if isinstance(m, nn.Linear) and isinstance(parent_module, CustomMultiheadAttention):
-            if projection_name is not None and projection_name not in m_name:
-                return False
+        if isinstance(m, nn.Linear) and ('mat_qkv' in m_name or 'proj' in m_name):
             return True
+        return False
 
     return filter_condition
