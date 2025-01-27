@@ -167,9 +167,9 @@ def get_swin_t():
     return model
 
 def get_var_d16():
-    # model_ckpt = f'var_d16.pth'
-    # if not os.path.exists(model_ckpt):
-    #     os.system(f'wget https://huggingface.co/FoundationVision/var/resolve/main/{model_ckpt}')
+    model_ckpt = f'var_d16.pth'
+    if not os.path.exists(model_ckpt):
+        os.system(f'wget https://huggingface.co/FoundationVision/var/resolve/main/{model_ckpt}')
     
     # Params
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -264,9 +264,11 @@ def get_var_d16():
     model.input_channels = 3
     model.forward_generator = partial(forward_generator, model)
 
+    model.load_state_dict(torch.load(model_ckpt, map_location=device), strict=True)
     var_wo_ddp: VAR = compile_model(model, 0)
     var: DDP = (DDP if dist.initialized() else NullDDP)(var_wo_ddp, device_ids=[dist.get_local_rank()], find_unused_parameters=False, broadcast_buffers=False)
     
+
     return var
 
 def compile_model(m, fast):

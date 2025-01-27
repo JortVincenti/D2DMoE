@@ -15,6 +15,8 @@ from train import TrainingContext, setup_accelerator, setup_data, setup_optimiza
 from utils import load_model, get_module_by_name, add_save_activations_hook, save_state, get_lrs, Mixup
 from utils_var import arg_util
 from architectures.quant import VectorQuantizer2
+import dist
+from trainer import VARTrainer
 
 class ReplaceModulesTrainingContext(TrainingContext):
     base_model: torch.nn.Module = None
@@ -32,7 +34,6 @@ class ReplaceModulesTrainingContext(TrainingContext):
 def setup_model(args, tc):
     assert args.model_class == 'mha_rep_distill'
     base_model, base_args, _ = load_model(args, args.base_on, args.exp_id)
-    simplify_mha(base_model)
     model_args = args.model_args
     model, tc.replaced_module_names = replace_mha_projections(base_model, **model_args)
     init_fun = INIT_NAME_MAP[args.init_fun]
@@ -104,48 +105,61 @@ def training_loop(args, tc):
         except StopIteration:
             train_iter = iter(tc.train_loader)
             X, y = next(train_iter)
-        if mixup_fn is not None:
-            X, y = mixup_fn(X, y)
-        # training step
+        # print('y', y.shape)
+        # print('X', X.shape)
+        # if mixup_fn is not None: 
+        #     y, X = mixup_fn(X, y) Jort: Maybe to put back later? 
+        # print('y', y.shape)
+        # print('X', X.shape)
+        # # training step
         # (save inputs and outputs with hooks)
-        set_for_distillation_iteration(tc)
-
-        print("*"*100)
-        print(X.shape, y.shape)
-        print(X)
-        print(y)
-        print("*"*100)
-        
-        quantize_local = VectorQuantizer2(
-            vocab_size=tc.model_vae.vocab_size, Cvae=32, using_znorm=False, beta=0.25,
-            default_qresi_counts=0, v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16), quant_resi=0.5, share_quant_resi=4,
-        )
+        set_for_distillation_iteration(tc)        
+        # quantize_local = VectorQuantizer2(
+        #     vocab_size=tc.model_vae.vocab_size, Cvae=32, using_znorm=False, beta=0.25,
+        #     default_qresi_counts=0, v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16), quant_resi=0.5, share_quant_resi=4,
+        # )
 
         with torch.no_grad():
-
             B, V = y.shape[0], tc.model_vae.vocab_size
             X = X.to(dist.get_device(), non_blocking=True)
             label_B = y.to(dist.get_device(), non_blocking=True)
-            
-            gt_idx_Bl: List[ITen] = tc.model_vae.img_to_idxBl(X)
-            gt_BL = torch.cat(gt_idx_Bl, dim=1)
-            x_BLCv_wo_first_l: Ten = quantize_local.idxBl_to_var_input(gt_idx_Bl)
-            
-            # self.var_wo_ddp.forward
-            # logits_BLV = self.var_wo_ddp(label_B, x_BLCv_wo_first_l)
-            
+            gt_idx_Bl: List[ITen] = tc.model_vae.img_to_idxBl(X) # This does not return None
+            x_BLCv_wo_first_l: Ten = tc.model_vae.quantize.idxBl_to_var_input(gt_idx_Bl)
             tc.base_model(label_B, x_BLCv_wo_first_l)
+
         # iterate over each layer, calculate loss for each ACM individually
-        ADd
         module_losses = []
+
         for module_name in tc.replaced_module_names:
             module = tc.replacement_modules[module_name]
+            # print("-"*100)
+            # print(module)
+            # print(tc.base_model)
+            # print("-"*100)
             original_input = tc.base_modules_inputs[module_name][0].detach()
             original_output = tc.base_modules_outputs[module_name].detach()
             with tc.accelerator.autocast():
+                #print("*"*100)
                 output = module(original_input)
+                # print("*"*100)
+                # print(output)
+                # print('-'*100)
+                # print(original_output)
+                # print("*"*100)
+                # Check for NaN values in the output
+                nan_count = torch.sum(torch.isnan(output)).item()
+
+                if nan_count > 0:
+                    print(f"Number of NaN values in {module_name} output of batch {tc.state.current_batch}: {nan_count}")
+                    # Optionally replace NaNs with -inf if needed
+                    #output = torch.where(torch.isnan(output), torch.tensor(float('-inf'), device=output.device), output)
+
+
                 assert not torch.any(
                     torch.isnan(output)), f'NaN present in {module_name} output of batch {tc.state.current_batch}'
+                # print(output.shape)
+                # print(original_output.shape)
+                # print("*"*100)
                 module_loss = criterion(output, original_output)
                 assert not torch.any(
                     torch.isnan(module_loss)), f'NaN present in {module_name} loss for batch {tc.state.current_batch}'
@@ -154,7 +168,21 @@ def training_loop(args, tc):
             if tc.accelerator.is_main_process:
                 tc.writer.add_scalar(f'Train/Module {module_name} loss', module_loss.item(),
                                      global_step=tc.state.current_batch)
-        distill_loss = torch.stack(module_losses).mean()
+        
+        # Stack module losses
+        distill_losses = torch.stack(module_losses)
+
+        # Remove inf and -inf values
+        distill_losses = distill_losses[~torch.isinf(distill_losses)]
+
+        # Check if there are valid values left
+        if distill_losses.numel() > 0:
+            distill_loss = distill_losses.mean()
+        else:
+            distill_loss = torch.tensor(0.0, device=distill_losses.device)  # Default value if no valid losses
+
+        print('module_losses', module_losses)
+        print('distill_loss', distill_loss)
         if tc.accelerator.is_main_process:
             tc.writer.add_scalar(f'Train/Rep. Distill Loss', distill_loss.item(), global_step=tc.state.current_batch)
             # get activations / pre-activations and compute sparsity loss
@@ -178,7 +206,7 @@ def training_loop(args, tc):
                         min=args.dsti_clamp_displacement) - args.dsti_clamp_displacement
                     sparsity_loss += clamped_preactivations.sum(dim=-1).mean()
                 sparsity_loss /= len(tc.sparsity_modules_inputs)
-            elif args.dsti_enforce_mode == 'relu_hoyer':
+            elif args.dsti_enforce_mode == 'relu_hoyer': # This is used 
                 for module_name, acts in tc.sparsity_modules_outputs.items():
                     sparsity_loss += square_hoyer(acts, dim=-1).mean()
                 sparsity_loss /= len(tc.sparsity_modules_inputs)
@@ -195,7 +223,9 @@ def training_loop(args, tc):
                 dsti_enforce_weight = args.dsti_enforce_weight if args.dsti_enforce_weight is not None else 0.0
             else:
                 raise NotImplementedError()
+
             total_loss += dsti_enforce_weight * sparsity_loss
+
         tc.optimizer.zero_grad(set_to_none=True)
         tc.accelerator.backward(total_loss)
         if args.clip_grad_norm is not None:
@@ -241,10 +271,35 @@ def train(args):
     setup_state(tc)
     
     make_vae(args, tc)
-    print("tc.model_vae", tc.model_vae)
 
-    training_loop(args, tc)
+    # training_loop(args, tc) # Jort: To put back when ready
+
+    var_ckpt = f'var_d16.pth'
+    tc.model_var_wo_ddp.load_state_dict(torch.load(var_ckpt, map_location='cuda'), strict=True)
+    var: DDP = (DDP if dist.initialized() else NullDDP)(tc.model_var_wo_ddp, device_ids=[dist.get_local_rank()], find_unused_parameters=False, broadcast_buffers=False)
+    tc.model = var
+    # Build the trainer
+    tc.trainer = VARTrainer(
+        device=args.device, # correct
+        patch_nums=args.patch_nums, # correct
+        resos=args.resos, # correct
+        vae_local=tc.model_vae,
+        var_wo_ddp=tc.model_var_wo_ddp, # correct
+        var=tc.model, # correct
+        var_opt=tc.optimizer, # correct
+        label_smooth=args.ls # correct
+    )
     final_eval(args, tc)
+
+
+class NullDDP(torch.nn.Module):
+    def __init__(self, module, *args, **kwargs):
+        super(NullDDP, self).__init__()
+        self.module = module
+        self.require_backward_grad_sync = False
+    
+    def forward(self, *args, **kwargs):
+        return self.module(*args, **kwargs)
 
 
 def main():

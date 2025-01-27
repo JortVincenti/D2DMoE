@@ -304,6 +304,7 @@ def add_save_activations_hook(model, module_names):
 
         def save_activations_hook(m, input, output):
             module_name = module_id_to_name[id(m)]
+
             # TODO will multiple inputs/outputs ever be used?
             module_inputs[module_name] = input
             module_outputs[module_name] = output
@@ -329,6 +330,8 @@ def add_save_inputs_hook(model, module_names):
         handle = module.register_forward_hook(save_activations_hook)
         hook_handles.append(handle)
     return module_inputs, hook_handles
+
+
 
 
 def add_save_outputs_hook(model, module_names):
@@ -601,6 +604,7 @@ def load_model(args, exp_name: str, exp_id: str, device: Union[torch.device, str
         exp_id = arg.exp_id
     # create model from the most nested base model
     for arg, model_arg in zip(reversed(run_args), reversed(run_model_args)):
+        print(f'Creating model for {arg.model_class} with args: {model_arg}')
         if arg.base_on is None:
             model = create_model(arg.model_class, model_arg).to(device)
         elif arg.model_class == 'moefication_router':

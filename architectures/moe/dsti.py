@@ -42,7 +42,7 @@ class SimpleMLP(torch.nn.Sequential, SubstitutionMLP):
             layers.append(ACTIVATION_NAME_MAP[activation]())
             layers.append(torch.nn.Dropout(dropout))
             in_dim = hidden_dim
-        layers.append(torch.nn.Linear(in_dim, hidden_sizes[-1], bias=bias))
+        layers.append(torch.nn.Linear(in_dim, hidden_sizes[-1], bias=bias)) # Jort added this to make match output dim of CustomMultiheadAttention
         layers.append(torch.nn.Dropout(dropout))
         torch.nn.Sequential.__init__(self, *layers)
 
@@ -121,7 +121,7 @@ def replace_mha_projections(original_model: nn.Module,
         d = original_model.config.n_embd
     else:
             # d = original_model.hidden_dim Jort: this is not correct
-            d = original_model.module.C
+        d = original_model.module.C
 
     attention_dim = round(flops_factor * (d ** 2 + d) / (2 * d + 1))
     if dropout == 'same':
@@ -156,8 +156,14 @@ def replace_mha_projections(original_model: nn.Module,
     for name in modules_to_replace:
         original_module = get_module_by_name(model, name)
         bias = bias if bias is not None else original_module.bias is not None
+        
+        if 'proj' in name:
+            end_d = 1024
+        if 'mat_qkv' in name:
+            end_d = 3072
+
         replacement = MLP_NAME_MAP[mlp_type](d,
-                                             [attention_dim, d],
+                                             [attention_dim, end_d],
                                              activation=activation,
                                              bias=bias,
                                              dropout=dropout)

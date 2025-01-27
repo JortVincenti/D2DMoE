@@ -89,6 +89,7 @@ class SelfAttention(nn.Module):
     # NOTE: attn_bias is None during inference because kv cache is enabled
     def forward(self, x, attn_bias):
         B, L, C = x.shape
+        _ = self.mat_qkv(x) # Jort: for the sake of saving the weight in the state_dict
         
         qkv = F.linear(input=x, weight=self.mat_qkv.weight, bias=torch.cat((self.q_bias, self.zero_k_bias, self.v_bias))).view(B, L, 3, self.num_heads, self.head_dim)
         main_type = qkv.dtype

@@ -510,7 +510,7 @@ def make_vae(args, tc):
     )
     
     vae_ckpt = 'vae_ch160v4096z32.pth'
-    vae_local.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True)
+    vae_local.load_state_dict(torch.load(vae_ckpt, map_location='cuda'), strict=True)
     
     vae_local: VQVAE = compile_model(vae_local, args.vfast)
     var_wo_ddp: VAR = compile_model(var_wo_ddp, args.tfast)

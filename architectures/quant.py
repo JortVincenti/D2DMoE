@@ -32,11 +32,12 @@ class VectorQuantizer2(nn.Module):
         else:                       # partially shared: \phi_{1 to share_quant_resi} for K scales
             self.quant_resi = PhiPartiallyShared(nn.ModuleList([(Phi(Cvae, quant_resi) if abs(quant_resi) > 1e-6 else nn.Identity()) for _ in range(share_quant_resi)]))
         
+        self.quant_resi = self.quant_resi.to('cuda')
         self.register_buffer('ema_vocab_hit_SV', torch.full((len(self.v_patch_nums), self.vocab_size), fill_value=0.0))
         self.record_hit = 0
         
         self.beta: float = beta
-        self.embedding = nn.Embedding(self.vocab_size, self.Cvae)
+        self.embedding = nn.Embedding(self.vocab_size, self.Cvae).to('cuda')
         
         # only used for progressive training of VAR (not supported yet, will be tested and supported in the future)
         self.prog_si = -1   # progressive training: not supported yet, prog_si always -1
@@ -177,6 +178,11 @@ class VectorQuantizer2(nn.Module):
         pn_next: int = self.v_patch_nums[0]
         for si in range(SN-1):
             if self.prog_si == 0 or (0 <= self.prog_si-1 < si): break   # progressive training: not supported yet, prog_si always -1
+            # # Check devices of tensors
+            # print(f"self.embedding device: {self.embedding.weight.device}")
+            # print(f"gt_ms_idx_Bl device: {torch.tensor(gt_ms_idx_Bl).device}")
+            # print(f"si device: {si.device if isinstance(si, torch.Tensor) else 'not a tensor'}")
+
             h_BChw = F.interpolate(self.embedding(gt_ms_idx_Bl[si]).transpose_(1, 2).view(B, C, pn_next, pn_next), size=(H, W), mode='bicubic')
             f_hat.add_(self.quant_resi[si/(SN-1)](h_BChw))
             pn_next = self.v_patch_nums[si+1]

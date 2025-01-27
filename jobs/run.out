@@ -16,40 +16,40 @@ on the system, please use 'module avail' or 'module spider' to search for it.
 rm: refusing to remove '.' or '..' directory: skipping 'shared/results/effbench_logs/.'
 rm: refusing to remove '.' or '..' directory: skipping 'shared/results/effbench_logs/..'
 [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
-[01-24 22:28:16] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
-[01-24 22:28:16] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
-[01-24 22:28:16] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
-[01-24 22:28:16] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
-[01-24 22:28:16] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
-[01-24 22:28:16] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
-[01-24 22:28:16] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
-[01-24 22:28:16] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
-[01-24 22:28:16] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
-[01-24 22:28:16] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
-[01-24 22:28:16] (oE/scripts/d2dmoe_var.py, line 177)=> base_run_name TINYIMAGENET_PATH_var_d16_6BUQNRX6_1
-[01-24 22:28:16] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
-[01-24 22:28:16] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
-[01-24 22:28:16] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
-[01-24 22:28:16] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
-[01-24 22:28:16] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
-[01-24 22:28:16] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
-[01-24 22:28:16] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
-[01-24 22:28:16] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
-[01-24 22:28:16] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
-[01-24 22:28:16] (oE/scripts/d2dmoe_var.py, line 352)=> Exp names: ['TINYIMAGENET_PATH_var_d16_6BUQNRX6', 'TINYIMAGENET_PATH_mha_rep_distill_HSAUVEYJ', 'TINYIMAGENET_PATH_enforce_sparsity_LTX6DGFB', 'TINYIMAGENET_PATH_dsti_expert_split_7VA2UYLK', 'TINYIMAGENET_PATH_dsti_router_PQUT7N6Z']
-[01-24 22:28:16] (oE/scripts/d2dmoe_var.py, line 353)=> Display names: ['VAR', 'MHA distillation', 'Sparsity enforcement', 'DSTI expert split', 'DSTI']
-[01-24 22:28:16] (oE/scripts/d2dmoe_var.py, line 354)=> SLURM JIDs: ['9596868']
+[01-28 00:16:43] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
+[01-28 00:16:43] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
+[01-28 00:16:43] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
+[01-28 00:16:43] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
+[01-28 00:16:43] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[01-28 00:16:43] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[01-28 00:16:43] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[01-28 00:16:43] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[01-28 00:16:43] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[01-28 00:16:43] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[01-28 00:16:43] (oE/scripts/d2dmoe_var.py, line 177)=> base_run_name TINYIMAGENET_PATH_var_d16_NFC3JIFG_1
+[01-28 00:16:43] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[01-28 00:16:43] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[01-28 00:16:43] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[01-28 00:16:43] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[01-28 00:16:43] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[01-28 00:16:43] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[01-28 00:16:43] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[01-28 00:16:43] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[01-28 00:16:43] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[01-28 00:16:43] (oE/scripts/d2dmoe_var.py, line 352)=> Exp names: ['TINYIMAGENET_PATH_var_d16_NFC3JIFG', 'TINYIMAGENET_PATH_mha_rep_distill_5RUEW6YG', 'TINYIMAGENET_PATH_enforce_sparsity_SK27CGWI', 'TINYIMAGENET_PATH_dsti_expert_split_OV2BLXXS', 'TINYIMAGENET_PATH_dsti_router_Z5U7BRK4']
+[01-28 00:16:43] (oE/scripts/d2dmoe_var.py, line 353)=> Display names: ['VAR', 'MHA distillation', 'Sparsity enforcement', 'DSTI expert split', 'DSTI']
+[01-28 00:16:43] (oE/scripts/d2dmoe_var.py, line 354)=> SLURM JIDs: ['9630043']
 
 JOB STATISTICS
 ==============
-Job ID: 9596863
+Job ID: 9630036
 Cluster: snellius
 User/Group: jvincenti/jvincenti
 State: COMPLETED (exit code 0)
 Nodes: 1
 Cores per node: 18
-CPU Utilized: 00:00:10
-CPU Efficiency: 1.92% of 00:08:42 core-walltime
-Job Wall-clock time: 00:00:29
-Memory Utilized: 2.18 MB
+CPU Utilized: 00:00:09
+CPU Efficiency: 2.78% of 00:05:24 core-walltime
+Job Wall-clock time: 00:00:18
+Memory Utilized: 2.22 MB
 Memory Efficiency: 0.00% of 120.00 GB

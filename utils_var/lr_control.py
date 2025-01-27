@@ -108,6 +108,6 @@ def filter_params(model, nowd_keys=()) -> Tuple[
     # print()
     #assert len(names_no_grad) == 0, f'[get_param_groups] names_no_grad = \n{pformat(names_no_grad, indent=2, width=240)}\n'
     if len(names_no_grad) > 0:
-        print(f"Warning: Frozen parameters detected:\n{pformat(names_no_grad, indent=2, width=240)}")
+        print(f"Warning: Frozen parameters detected:\n{names_no_grad}")
 
     return names, paras, list(para_groups.values())
