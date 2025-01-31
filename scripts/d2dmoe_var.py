@@ -54,7 +54,7 @@ def main():
     # partition = 'rtx3080'
     # partition = 'batch'
 
-    timeout = 10 #60 * 24 * 7
+    timeout = 60 #60 * 24 * 7
     # timeout = 60 * 24 * 2
 
     gpus_per_task = 1
@@ -87,8 +87,8 @@ def main():
     common_args.dataset = 'TINYIMAGENET_PATH' #'imagenet'
     common_args.dataset_args = {}
     common_args.dataset_args.variant = 'deit3_rrc'# deit3 Jort added this would be for the train class to work for tiny deit3
-    common_args.mixup_alpha = 0.8
-    common_args.cutmix_alpha = 1.0
+    common_args.mixup_alpha = None #0.8
+    common_args.cutmix_alpha = None #1.0
     common_args.mixup_smoothing = 0.1
     common_args.batch_size = 16 #128
     common_args.loss_type = 'ce'
@@ -174,16 +174,14 @@ def main():
         args.exp_id = exp_id
         exp_name, run_name = generate_run_name(args)
         base_run_name = f'{base_exp_name}_{exp_id}'
-        print('base_run_name', base_run_name)
-        
-        if base_run_name in run_to_job_map:
-            dependency_str = f"afterany:{run_to_job_map[base_run_name].job_id}"
-            executor.update_parameters(slurm_additional_parameters={"dependency": dependency_str})
-        else:
-            executor.update_parameters(slurm_additional_parameters={})
-        job = submit_job(executor, mha_distill, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
-        jobs.append(job)
-        run_to_job_map[run_name] = job
+        # if base_run_name in run_to_job_map:
+        #     dependency_str = f"afterany:{run_to_job_map[base_run_name].job_id}"
+        #     executor.update_parameters(slurm_additional_parameters={"dependency": dependency_str})
+        # else:
+        #     executor.update_parameters(slurm_additional_parameters={})
+        # job = submit_job(executor, mha_distill, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
+        # jobs.append(job)
+        # run_to_job_map[run_name] = job
     exp_names.append(exp_name)
     base_distill_exp_names.append(exp_names[-1])
     display_names.append(f'MHA distillation')
@@ -192,13 +190,13 @@ def main():
     # Jort: Third Job to run
     # dsti_gpus_per_task = 4
     # dsti_gpus_per_task = 3
-    dsti_gpus_per_task = 2
+    dsti_gpus_per_task = 1
 
     sparsity_enforcement_args = deepcopy(common_args)
     sparsity_enforcement_args.dsti_enforce_mode = 'relu_hoyer'
     sparsity_enforcement_args.dsti_clamp_displacement = -10.0
     # sparsity_enforcement_args.dsti_enforce_weight = 5e-1
-    sparsity_enforcement_args.dsti_enforce_weight = 2e-1
+    sparsity_enforcement_args.dsti_enforce_weight = 2e-1  #Jort: Set this to 0 if you want to disable the enforcement
     # sparsity_enforcement_args.dsti_enforce_weight = 1e-1
     # sparsity_enforcement_args.dsti_enforce_weight = 5e-2
     # sparsity_enforcement_args.dsti_enforce_weight = 1e-2
@@ -211,7 +209,7 @@ def main():
     sparsity_enforcement_args.model_class = 'enforce_sparsity'
     sparsity_enforcement_args.model_args = {}
     sparsity_enforcement_args.model_args.apply_to = 'moe_eligible_only'
-    sparsity_enforcement_args.epochs = 5 #90
+    sparsity_enforcement_args.epochs = 20
     # sparsity_enforcement_args.epochs = 0.1
     sparsity_enforcement_args.batch_size = 128
     # sparsity_enforcement_args.batch_size = 512
@@ -255,17 +253,17 @@ def main():
     # # ════════════════════════ dsti moe split settings ════════════════════════ #
     # Jort: Fourth Job to run
     # dsti_gpus_per_task = 4
-    dsti_gpus_per_task = 2
+    dsti_gpus_per_task = 1
 
     expert_split_args = deepcopy(common_args)
     expert_split_args.model_class = 'dsti_expert_split'
-    expert_split_args.epochs = 0
+    expert_split_args.epochs = 1
     expert_split_args.batch_size = 64
     expert_split_args.model_args = {}
     # expert_split_args.model_args.expert_size = 32
     # expert_split_args.model_args.expert_size = 24
     # expert_split_args.model_args.expert_size = 12
-    expert_split_args.model_args.expert_size = 6
+    expert_split_args.model_args.expert_size = 8 #6
     expert_split_args.model_args.experts_class = 'execute_all'
 
     # # ════════════════════════ dsti moe split ════════════════════════ #
@@ -278,14 +276,14 @@ def main():
             args.base_on = base_on_exp_name
             exp_name, run_name = generate_run_name(args)
             base_run_name = f'{base_on_exp_name}_{exp_id}'
-            # if base_run_name in run_to_job_map:
-            #     dependency_str = f"afterany:{run_to_job_map[base_run_name].job_id}"
-            #     executor.update_parameters(slurm_additional_parameters={"dependency": dependency_str})
-            # else:
-            #     executor.update_parameters(slurm_additional_parameters={})
-            # job = submit_job(executor, dsti_expert_split, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
-            # jobs.append(job)
-            # run_to_job_map[run_name] = job
+            if base_run_name in run_to_job_map:
+                dependency_str = f"afterany:{run_to_job_map[base_run_name].job_id}"
+                executor.update_parameters(slurm_additional_parameters={"dependency": dependency_str})
+            else:
+                executor.update_parameters(slurm_additional_parameters={})
+            job = submit_job(executor, dsti_expert_split, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
+            jobs.append(job)
+            run_to_job_map[run_name] = job
         exp_names.append(exp_name)
         base_split_exp_names.append(exp_names[-1])
         display_names.append(f'DSTI expert split')
@@ -293,7 +291,7 @@ def main():
     # ════════════════════════ dsti router training model settings ════════════════════════ #
 
     # dsti_gpus_per_task = 4
-    dsti_gpus_per_task = 2
+    dsti_gpus_per_task = 1
 
     dsti_routing_args = deepcopy(common_args)
     dsti_routing_args.model_class = 'dsti_router'

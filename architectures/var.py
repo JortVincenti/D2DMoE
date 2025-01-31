@@ -348,6 +348,18 @@ class VAR(nn.Module):
         :param x_BLCv_wo_first_l: teacher forcing input (B, self.L-self.first_l, self.Cvae)
         :return: logits BLV, V is vocab_size
         """
+        device = self.class_emb.weight.device  # Get model device
+
+        # Move label_B only if needed
+        if label_B.device != device:
+            label_B = label_B.to(device)
+
+        device = self.word_embed.weight.device  # Get model device
+        # Move x_BLCv_wo_first_l only if needed
+        if x_BLCv_wo_first_l.device != device:
+            x_BLCv_wo_first_l = x_BLCv_wo_first_l.to(device)
+
+
         bg, ed = self.begin_ends[self.prog_si] if self.prog_si >= 0 else (0, self.L)
         B = x_BLCv_wo_first_l.shape[0]
         with torch.cuda.amp.autocast(enabled=False):

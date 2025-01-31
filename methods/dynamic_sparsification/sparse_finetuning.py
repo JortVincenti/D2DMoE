@@ -23,6 +23,7 @@ from train import (
     setup_files_and_logging,
     setup_optimization,
     setup_state,
+    make_vae,
 )
 from utils import (
     Mixup,
@@ -36,6 +37,11 @@ from utils import (
     save_state,
     set_module_by_name,
 )
+from trainer import VARTrainer
+from utils_var import arg_util
+from architectures import VAR, VQVAE, build_vae_var
+from architectures.basic_var import FFN
+import dist
 
 
 class EnforceSparsityTrainingContext(TrainingContext):
@@ -43,14 +49,20 @@ class EnforceSparsityTrainingContext(TrainingContext):
     modules_inputs: Dict = None
     modules_outputs: Dict = None
     model_hook_handles: List = None
+    var_wo_ddp = None
 
 
 def eligible_activation_filter(model: nn.Module, m: nn.Module):
     # TODO handle cases when functional variant is used instead
     m_name = get_module_name(model, m)
     parent_module = get_module_by_name(model, get_parent_module_name(m_name))
+    # print("----"*100)
+    # print("m_name", m_name) 
+    # print("parent", parent_module)
+    # print(isinstance(m, (nn.ReLU, nn.GELU, GELUActivation, PytorchGELUTanh)), isinstance(parent_module, (MLP, TorchvisionMLP, SimpleMLP, GPTMLP, BertIntermediate, GemmaMLP, FFN)))
+    # print("----"*100)
     if isinstance(m, (nn.ReLU, nn.GELU, GELUActivation, PytorchGELUTanh)) and isinstance(parent_module, (
-            MLP, TorchvisionMLP, SimpleMLP, GPTMLP, BertIntermediate, GemmaMLP)):
+            MLP, TorchvisionMLP, SimpleMLP, GPTMLP, BertIntermediate, GemmaMLP, FFN)):
         return True
 
 
@@ -74,14 +86,16 @@ def replace_with_relu(model, acts_to_replace):
 
 def setup_model(args, tc):
     assert args.model_class == 'enforce_sparsity'
-    model, base_args, _ = load_model(args, args.base_on, args.exp_id)
+    model, base_args, _, tc.var_wo_ddp = load_model(args, args.base_on, args.exp_id)
     model = tc.accelerator.prepare(model)
     activations_to_sparsify = find_activations(model, **args.model_args)
+
     if 'relu' in args.dsti_enforce_mode:
         model = replace_with_relu(model, activations_to_sparsify)
         # TODO add "apply_to" argument to find_relu_activations
         activations_to_sparsify.extend(find_relu_activations(model))
     logging.info(f'Modules selected for activation sparsification: {activations_to_sparsify}')
+
     tc.modules_inputs, tc.modules_outputs, tc.model_hook_handles = \
         add_save_activations_hook(model, activations_to_sparsify)
     init_fun = INIT_NAME_MAP[args.init_fun]
@@ -89,7 +103,7 @@ def setup_model(args, tc):
         init_fun(tc.model)
     tc.model = tc.accelerator.prepare(model)
     # make sure all parameters are being optimized
-    tc.model.requires_grad_(True)
+    # tc.model.requires_grad_(True)
 
 
 def square_hoyer(tensor, dim=-1, eps=1e-15):
@@ -99,11 +113,27 @@ def square_hoyer(tensor, dim=-1, eps=1e-15):
 
 
 def training_loop(args, tc):
+    print('Start training loop')
     if tc.accelerator.is_main_process:
         model_saved = datetime.now()
     train_iter = iter(tc.train_loader)
     unwrapped_model = tc.accelerator.unwrap_model(tc.model)
-    if args.mixup_alpha is not None or args.cutmix_alpha is not None:
+
+    print("Model parameters being trained:")
+    for name, param in tc.model.named_parameters():
+        if param.requires_grad and 'ffn' not in name: # Jort: Just retrain the ffn 
+            param.requires_grad = False
+
+    for name, param in tc.model.named_parameters():
+        if param.requires_grad:
+            print(f"Parameter: {name}, Shape: {param.shape}")
+    
+    train_loss = nn.CrossEntropyLoss(label_smoothing=args.ls, reduction='none')
+    L = sum(pn * pn for pn in args.patch_nums)
+    loss_weight = torch.ones(1, L, device=args.device) / L
+
+
+    if args.mixup_alpha is not None or args.cutmix_alpha is not None: # Jort: This is None
         mixup_mode = 'batch' if args.mixup_mode is None else args.mixup_mode
         mixup_smoothing = 0.1 if args.mixup_smoothing is None else args.mixup_smoothing
         mixup_fn = Mixup(
@@ -111,6 +141,7 @@ def training_loop(args, tc):
             label_smoothing=mixup_smoothing, num_classes=unwrapped_model.number_of_classes)
     else:
         mixup_fn = None
+
     while tc.state.current_batch < tc.last_batch:
         # save model conditionally
         if tc.accelerator.is_main_process:
@@ -137,10 +168,16 @@ def training_loop(args, tc):
             if mixup_fn is not None:
                 X, y = mixup_fn(X, y)
             # forward
-            y_pred = tc.model(X)
-            if len(y_pred.shape) == 3:
-                # For CE loss on sequences
-                y_pred = y_pred.transpose(1, 2)
+            with torch.no_grad():
+                B, V = y.shape[0], tc.model_vae.vocab_size
+                X = X.to(dist.get_device(), non_blocking=True)
+                label_B = y.to(dist.get_device(), non_blocking=True)
+                gt_idx_Bl: List[ITen] = tc.model_vae.img_to_idxBl(X) # This does not return None
+                gt_BL = torch.cat(gt_idx_Bl, dim=1)
+                x_BLCv_wo_first_l: Ten = tc.model_vae.quantize.idxBl_to_var_input(gt_idx_Bl)
+            
+            logits_BLV = tc.model(label_B, x_BLCv_wo_first_l)
+
             # get activations / pre-activations and compute sparsity loss
             sparsity_loss_ffn = 0.0
             sparse_activations_sum_ffn = 0
@@ -191,18 +228,22 @@ def training_loop(args, tc):
                         sparse_activations_sum_ffn += sparse_activations_sum
                         total_activations_sum_ffn += total_activations_sum
                         total_num_outputs_ffn += 1
-            elif args.dsti_enforce_mode == 'relu_hoyer':
+            elif args.dsti_enforce_mode == 'relu_hoyer': # Jort This one is used!
                 for module_name, acts in tc.modules_outputs.items():
+                    if 'q_proj' in module_name or 'k_proj' in module_name or 'v_proj' in module_name or 'o_proj' in module_name: # Jort: For now we skip this.
+                        continue
                     assert isinstance(acts, torch.Tensor)
                     sparsity_loss = square_hoyer(acts, dim=-1).mean()
                     sparse_activations_sum = (acts <= 0).sum().item()
                     total_activations_sum = acts.numel()
-                    if 'q_proj' in module_name or 'k_proj' in module_name or 'v_proj' in module_name or 'o_proj' in module_name:
+
+                    if 'q_proj' in module_name or 'k_proj' in module_name or 'v_proj' in module_name or 'o_proj' in module_name: # Jort: For now we skip this.
                         sparsity_loss_attn += sparsity_loss
                         sparse_activations_sum_attn += sparse_activations_sum
                         total_activations_sum_attn += total_activations_sum
                         total_num_outputs_attn += 1
                     else:
+                        assert 'ffn' in module_name
                         sparsity_loss_ffn += sparsity_loss
                         sparse_activations_sum_ffn += sparse_activations_sum
                         total_activations_sum_ffn += total_activations_sum
@@ -248,8 +289,10 @@ def training_loop(args, tc):
                 sparsity_loss_attn /= total_num_outputs_attn
             sparsity_loss_ffn /= total_num_outputs_ffn
             # task loss
-            task_loss = tc.criterion(y_pred, y)
-            if args.dsti_enforce_schedule == 'linear':
+            task_loss = train_loss(logits_BLV.view(-1, V), gt_BL.view(-1)).view(B, -1) #tc.criterion(y_pred, y)
+            task_loss = task_loss.mul(loss_weight).sum(dim=-1).mean()
+
+            if args.dsti_enforce_schedule == 'linear': # Jort: This one is used
                 # main
                 dsti_enforce_weight = tc.state.current_batch / tc.last_batch * args.dsti_enforce_weight
                 if tc.accelerator.is_main_process and tc.state.current_batch in tc.eval_batch_list:
@@ -267,14 +310,23 @@ def training_loop(args, tc):
                 dsti_enforce_weight = args.dsti_enforce_weight
             else:
                 raise NotImplementedError()
-            if args.gradient_accumulation_steps > 1:
+            if args.gradient_accumulation_steps > 1: # Jort Not done
                 task_loss = task_loss / args.gradient_accumulation_steps
                 sparsity_loss_ffn = sparsity_loss_ffn / args.gradient_accumulation_steps
                 sparsity_loss_attn = sparsity_loss_attn / args.gradient_accumulation_steps
             # loss computation
+
             loss = (task_loss +
                     dsti_enforce_weight * sparsity_loss_ffn +
                     dsti_enforce_weight * sparsity_loss_attn)
+
+
+            print("task_loss:", task_loss, 
+            "sparsity_loss_ffn:", sparsity_loss_ffn, 
+            "sparsity_loss_attn:", sparsity_loss_attn, 
+            "dsti_enforce_weight:", dsti_enforce_weight, 
+            "loss:", loss, sep=" | ")
+
             tc.accelerator.backward(loss)
             cumulativte_total_loss += loss.item()
             cumulative_task_loss += task_loss.item()
@@ -296,7 +348,14 @@ def training_loop(args, tc):
             else:
                 tc.scheduler.step()
         # bookkeeping
-        if tc.accelerator.is_main_process:
+        if tc.accelerator.is_main_process:   
+            # print("=" * 100)
+            # print("task_loss", task_loss)
+            # print("sparsity_loss_ffn", sparsity_loss_ffn)
+            # print("sparsity_loss_attn", sparsity_loss_attn)
+            # print("dsti_enforce_weight", dsti_enforce_weight)
+            # print("loss", loss)
+            # print("=" * 100)
             tc.writer.add_scalar('Train/Task loss', cumulative_task_loss, global_step=tc.state.current_batch)
             tc.writer.add_scalar('Train/Sparsity loss FFN', cumulative_sparsity_loss_ffn,
                                  global_step=tc.state.current_batch)
@@ -335,6 +394,7 @@ def train(args):
         force=True,
     )
     logging.info('Configured logging')
+    args: arg_util.Args = arg_util.init_dist_and_get_args(args)
     tc = EnforceSparsityTrainingContext()
     tc.sparsity_enforcement_mode = args.dsti_enforce_mode
     tc.sparsity_enforcement_displacement = args.dsti_clamp_displacement
@@ -344,8 +404,27 @@ def train(args):
     setup_model(args, tc)
     setup_optimization(args, tc)
     setup_state(tc)
+    make_vae(args, tc)
+    print('11')
+    
+
+    # Build the trainer
+    tc.trainer = VARTrainer(
+        device=args.device, # correct
+        patch_nums=args.patch_nums, # correct
+        resos=args.resos, # correct
+        vae_local=tc.model_vae,
+        var_wo_ddp=tc.var_wo_ddp, # correct
+        var=tc.model, # correct
+        var_opt=tc.optimizer, # correct
+        label_smooth=args.ls # correct
+    )
+
+    print('12')
     training_loop(args, tc)
+    print('13')
     final_eval(args, tc)
+    print('14')
 
 
 def main():

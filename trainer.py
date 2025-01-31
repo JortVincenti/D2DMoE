@@ -61,14 +61,17 @@ class VARTrainer(object):
         self.var_wo_ddp.eval()
 
         # count = 0
+        device =  next(self.var_wo_ddp.parameters()).device 
         for inp_B3HW, label_B in ld_val:
+            # if  self.var_wo_ddp.device != 'cpu':
+            #     inp_B3HW, label_B = inp_B3HW.cuda(), label_B.cuda()
 
             B, V = label_B.shape[0], self.vae_local.vocab_size
             inp_B3HW = inp_B3HW.to(dist.get_device(), non_blocking=True)
             label_B = label_B.to(dist.get_device(), non_blocking=True)
             
             gt_idx_Bl: List[ITen] = self.vae_local.img_to_idxBl(inp_B3HW)
-            gt_BL = torch.cat(gt_idx_Bl, dim=1)
+            gt_BL = torch.cat(gt_idx_Bl, dim=1).to(device)
             x_BLCv_wo_first_l: Ten = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)
             
             self.var_wo_ddp.forward

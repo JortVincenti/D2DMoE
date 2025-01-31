@@ -12,6 +12,7 @@ from torchvision.models.vision_transformer import MLP
 
 from architectures.early_exits.pbee import PBEE
 from architectures.vit import MLP as CustomMLP
+from architectures import VAR
 from utils import flop_count, get_module_by_name, remove_hooks, find_module_names, add_save_activations_hook
 #import utils
 
@@ -22,9 +23,12 @@ def test_classification(accelerator: Accelerator,
                         model: torch.nn.Module,
                         data_loader: torch.utils.data.DataLoader,
                         criterion_class: torch.nn.Module,
+                        tc, 
                         batches: int = 0) -> Tuple[float, float]:
-    if hasattr(model, "patch_nums"):
-        L_mean, L_tail, acc_mean, acc_tail, total, elapsed_time = model.eval_ep(data_loader)
+
+    if any(isinstance(submodule, VAR) for submodule in model.modules()):
+        # model = accelerator.unwrap_model(model)
+        L_mean, L_tail, acc_mean, acc_tail, total, elapsed_time = tc.trainer.eval_ep(tc.val_loader)
         mean_loss = L_mean
         accuracy = acc_mean
     else:
@@ -34,7 +38,6 @@ def test_classification(accelerator: Accelerator,
             running_loss = 0.0
             correct, total = 0, 0
             for batch, (X, y) in enumerate(data_loader):
-                # Jort to do better.
                 y_pred = model(X)
                 y_pred, y = accelerator.gather_for_metrics((y_pred, y))
                 y_pred_max = y_pred.argmax(dim=-1)

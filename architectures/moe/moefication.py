@@ -23,6 +23,8 @@ from architectures.vit import VisionTransformer as CustomVisionTransformer
 from architectures.gpt import GPT, MLP as GPTMLP
 from common import ACTIVATION_NAME_MAP
 from utils import find_module_names, get_module_by_name, set_module_by_name
+from architectures.pretrained import NullDDP
+from architectures.basic_var import FFN
 
 
 class MoeficationMoE(MoELayer):
@@ -104,6 +106,7 @@ class MoeficationMoE(MoELayer):
 def replace_layer_with_moe(model, moefied_module_name, num_experts=None, expert_size=None,
                            experts_class='module'):
     original_module = get_module_by_name(model, moefied_module_name)
+
     if isinstance(original_module, nn.Sequential):
         # ffn is a nn.Sequential
         # with nn.Linear layers at indices 0 and 3
@@ -122,6 +125,9 @@ def replace_layer_with_moe(model, moefied_module_name, num_experts=None, expert_
         moefied_output_name = f'{moefied_module_name}.output'
         org_module_name = moefied_module_name
         moefied_module_name = f'{moefied_module_name}.mlp'
+    elif isinstance(original_module, FFN):
+        w1 = original_module.fc1
+        activation = type(original_module.act)
     else:
         raise ValueError(f'Unsupported ffn type: {type(original_module)}')
     add_residual = True if isinstance(original_module, ResidualMLP) else False
@@ -196,6 +202,14 @@ def replace_with_moes(original_model: nn.Module, num_experts: int = None, expert
             if isinstance(model.gemma.model.layers[i].self_attn, CustomMultiheadAttention):
                 raise NotImplementedError('Custom attention not supported with Gemma')
         model.gemma.forward = partial(moe_gemma_main_forward, model.gemma)
+    elif isinstance(model, NullDDP) or isinstance(getattr(model, 'module', None), NullDDP):
+        model = model.module
+        for i in range(len(model.blocks)):
+            model.blocks[i].forward = partial(moe_vit_block_forward, model.blocks[i])
+            # if isinstance(model.blocks[i].attn, CustomMultiheadAttention): # TODO
+            #     model.blocks[i].attn.forward = partial(moe_attention_forward, model.blocks[i].attn)
+        model.forward = partial(moe_vit_main_forward, model)
+
     else:
         raise ValueError(f'Unsupported model type: {type(model)}')
 
@@ -219,6 +233,9 @@ def param_clustering_split(ffn, moe_layer):
         w1 = ffn.gate_proj # We cluster by gate projection weights because they are actually sparse
         w2 = ffn.down_proj
         w3 = ffn.up_proj
+    elif isinstance(ffn, FFN):
+        w1 = ffn.fc1
+        w2 = ffn.fc2
     else:
         raise ValueError(f'Unsupported ffn type: {type(ffn)}')
 
@@ -289,6 +306,12 @@ def param_clustering_split(ffn, moe_layer):
 
 
 def split_original_parameters(original_model: nn.Module, moe_model: nn.Module, replaced_module_names: List[str]):
+    
+    if hasattr(original_model, "module"):  # Only access module if it exists
+        original_model = original_model.module  # Extract VAR model
+        for index, name in enumerate(replaced_module_names):
+            new_name =  name.replace("module.", "")
+            replaced_module_names[index] = new_name
     original_model.eval()
     assert len(replaced_module_names) > 0
     # calculate size and replace the selected layers with MoE layers

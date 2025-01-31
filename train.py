@@ -264,7 +264,7 @@ def setup_accelerator(args, tc): # Jort: This should be correct!
                                  # sometimes it happens that somehow it works with this argument, but fails without it
                                  # so - do not remove
                                  # see: https://github.com/pytorch/pytorch/issues/43259
-                                 kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)]
+                                 kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=False)] # Jort: Default is (find_unused_parameters=True)
                                  )
 
 
@@ -328,7 +328,7 @@ def setup_data(args, tc): # Jort: This should be correct!
         if tc.accelerator.is_main_process:
             logging.info(f'{tc.last_batch=}')
     tc.eval_batch_list = [
-        round(x) for x in torch.linspace(0, tc.last_batch, steps=args.eval_points, device='cpu').tolist()
+        round(x) for x in torch.linspace(0, tc.last_batch, steps=args.eval_points, device='cuda').tolist()
     ]
  
 def setup_optimization(args, tc): # Jort: This should be roughly correct (tc.optimizer, tc.scheduler)!
@@ -341,7 +341,6 @@ def setup_optimization(args, tc): # Jort: This should be roughly correct (tc.opt
     # # Compute the parameters to freeze by subtracting the ones to unfreeze
     # params_to_freeze = all_params - params_to_unfreeze
     # names, paras, para_groups = filter_params(tc.model, nowd_keys=params_to_freeze)
-
 
     names, paras, para_groups = filter_params(tc.model, nowd_keys={
         'cls_token', 'start_token', 'task_token', 'cfg_uncond',
@@ -381,7 +380,6 @@ def setup_optimization(args, tc): # Jort: This should be roughly correct (tc.opt
     )) # Jort: Originaly this should be wrapped into tc.accelerator.prepare() but this is not possible with AmpOptimizer
     del names, paras, para_groups
 
-
     if args.scheduler_class is not None:
         scheduler_args = deepcopy(args.scheduler_args)
         if 'patience' in scheduler_args:
@@ -391,6 +389,7 @@ def setup_optimization(args, tc): # Jort: This should be roughly correct (tc.opt
         if args.scheduler_class in ['cosine_with_warmup', 'linear', 'inverse_sqrt']:
             scheduler_args['num_training_steps'] = tc.last_batch
         tc.scheduler = tc.accelerator.prepare(SCHEDULER_NAME_MAP[args.scheduler_class](tc.optimizer, **scheduler_args)) #Jort this should be wrapped into tc.accelerator.prepare() but this is not possible with SCHEDULER_NAME_MAP
+
     if args.distill_from is not None:
         teacher_model, _, _ = load_model(args, args.distill_from, args.exp_id)
         tc.teacher_model = tc.accelerator.prepare(teacher_model)
@@ -449,21 +448,23 @@ def in_training_eval(args, tc):
                                                   tc.model,
                                                   tc.test_loader,
                                                   tc.criterion_type,
+                                                  tc, 
                                                   batches=args.eval_batches)
         if tc.accelerator.is_main_process and hasattr(tc, 'sparsity'):
             tc.writer.add_scalar('Eval/Test sparsity', tc.sparsity, global_step=tc.state.current_batch)
-        train_loss, train_acc = test_classification(tc.accelerator,
-                                                    tc.model,
-                                                    tc.train_eval_loader,
-                                                    tc.criterion_type,
-                                                    batches=args.eval_batches)
-        if tc.accelerator.is_main_process and hasattr(tc, 'sparsity'):
-            tc.writer.add_scalar('Eval/Train sparsity', tc.sparsity, global_step=tc.state.current_batch)
+        # train_loss, train_acc = test_classification(tc.accelerator,
+        #                                             tc.model,
+        #                                             tc.train_eval_loader,
+        #                                             tc.criterion_type,
+        #                                             tc,
+        #                                             batches=args.eval_batches)
+        # if tc.accelerator.is_main_process and hasattr(tc, 'sparsity'):
+        #     tc.writer.add_scalar('Eval/Train sparsity', tc.sparsity, global_step=tc.state.current_batch)
         if tc.accelerator.is_main_process:
             tc.writer.add_scalar('Eval/Test loss', test_loss, global_step=tc.state.current_batch)
             tc.writer.add_scalar('Eval/Test accuracy', test_acc, global_step=tc.state.current_batch)
-            tc.writer.add_scalar('Eval/Train loss', train_loss, global_step=tc.state.current_batch)
-            tc.writer.add_scalar('Eval/Train accuracy', train_acc, global_step=tc.state.current_batch)
+            # tc.writer.add_scalar('Eval/Train loss', train_loss, global_step=tc.state.current_batch)
+            # tc.writer.add_scalar('Eval/Train accuracy', train_acc, global_step=tc.state.current_batch)
 
 def setup_state(tc):
     tc.state = TrainingState()
@@ -501,22 +502,20 @@ def make_vae(args, tc):
     
     # build models 
     patch_nums = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)  
-    vae_local, var_wo_ddp = build_vae_var(
+    vae_local, _ = build_vae_var(
         V=4096, Cvae=32, ch=160, share_quant_resi=4,        # hard-coded VQVAE hyperparameters
         device=dist.get_device(), patch_nums=patch_nums,
         num_classes=1000, depth=16, shared_aln=args.saln, attn_l2_norm=args.anorm,
         flash_if_available=args.fuse, fused_if_available=args.fuse,
-        init_adaln=args.aln, init_adaln_gamma=args.alng, init_head=args.hd,
+        init_adaln=args.aln, init_adaln_gamma=args.alng, init_head=args.hd, only_vae=True
     )
     
     vae_ckpt = 'vae_ch160v4096z32.pth'
     vae_local.load_state_dict(torch.load(vae_ckpt, map_location='cuda'), strict=True)
     
     vae_local: VQVAE = compile_model(vae_local, args.vfast)
-    var_wo_ddp: VAR = compile_model(var_wo_ddp, args.tfast)
-
     tc.model_vae = vae_local
-    tc.model_var_wo_ddp = var_wo_ddp
+
     
 
 def train(args):

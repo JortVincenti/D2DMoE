@@ -33,7 +33,7 @@ class ReplaceModulesTrainingContext(TrainingContext):
 
 def setup_model(args, tc):
     assert args.model_class == 'mha_rep_distill'
-    base_model, base_args, _ = load_model(args, args.base_on, args.exp_id)
+    base_model, base_args, _, tc.model_var_wo_ddp = load_model(args, args.base_on, args.exp_id)
     model_args = args.model_args
     model, tc.replaced_module_names = replace_mha_projections(base_model, **model_args)
     init_fun = INIT_NAME_MAP[args.init_fun]

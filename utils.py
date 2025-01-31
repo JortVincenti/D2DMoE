@@ -562,9 +562,15 @@ def save_state(accelerator: Accelerator, state_path: Path):
 
 
 def retrieve_final(args, run_name: str, device: Union[torch.device, str] = 'cpu'):
-    final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_var_d16_GCJYOT4E_1/final.pth')
-    #final_path = args.runs_dir / run_name / 'final.pth'
-    print("Final Path:", final_path)
+    print("Run Name:", run_name)
+    if 'var' in run_name:
+        final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_var_d16_GCJYOT4E_1/final.pth') #Jort: Final VAR path
+    elif 'distill' in run_name:
+        final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_mha_rep_distill_MFR6DQD4_1/final.pth') # Jort: Final DSTI path
+    elif 'enforce_sparsity' in run_name:
+        final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_enforce_sparsity_C5DOGOFE_1/final.pth') # Jort: Final enforce sparsity path
+    else:
+        final_path = args.runs_dir / run_name / 'final.pth'
     if final_path.exists() and final_path.is_file():
         logging.info(f'Loading final state for {run_name} from {str(final_path)}')
         final_state = torch.load(final_path, map_location=device)
@@ -592,8 +598,7 @@ def load_model(args, exp_name: str, exp_id: str, device: Union[torch.device, str
     run_model_args = []
     original_exp_name = exp_name
     original_exp_id = exp_id
-    while exp_name is not None:
-
+    while exp_name is not None: #Jort: To avoid infinite loop
         state = retrieve_final(args, f'{exp_name}_{exp_id}', device)
         arg = state['args']
         model_arg = arg.model_args
@@ -602,11 +607,13 @@ def load_model(args, exp_name: str, exp_id: str, device: Union[torch.device, str
         run_model_args.append(model_arg)
         exp_name = arg.base_on if hasattr(arg, 'base_on') else None
         exp_id = arg.exp_id
+
     # create model from the most nested base model
     for arg, model_arg in zip(reversed(run_args), reversed(run_model_args)):
         print(f'Creating model for {arg.model_class} with args: {model_arg}')
         if arg.base_on is None:
-            model = create_model(arg.model_class, model_arg).to(device)
+            model, var_wo_ddp = create_model(arg.model_class, model_arg)
+            model = model.to(device)
         elif arg.model_class == 'moefication_router':
             # TODO refactor this and instantiation of MoEfication models so that no duplication here is needed
             from architectures.moe.moefication import add_routers
@@ -632,6 +639,8 @@ def load_model(args, exp_name: str, exp_id: str, device: Union[torch.device, str
                 ffn_filter_condition = ffn_filter_condition_bert
             elif isinstance(model, GemmaWrapper):
                 ffn_filter_condition = ffn_filter_condition_gemma
+            elif isinstance(model, NullDDP):
+                ffn_filter_condition = ffn_filter_condition_vit
             else:
                 raise NotImplementedError(f'Unknown model type: {type(model)}')
             model, _ = replace_with_moes(model, **model_arg, module_filter_contition=ffn_filter_condition)
@@ -645,9 +654,9 @@ def load_model(args, exp_name: str, exp_id: str, device: Union[torch.device, str
             # TODO refactor this so that no duplication here is needed
             from architectures.custom import simplify_mha
             from architectures.moe.dsti import replace_mha_projections
-            simplify_mha(model)
-            model, _ = replace_mha_projections(model, **model_arg)
-            if 'relu' in arg.dsti_enforce_mode:
+            #simplify_mha(model)
+            #model, _ = replace_mha_projections(model, **model_arg) Jort: THis is not needed right now
+            if 'relu' in arg.dsti_enforce_mode and False: #Jort: For now this is not needed since we keep gelu
                 from architectures.moe.dsti import replace_with_relu
                 from architectures.moe.dsti import find_gelu_activations
                 activations_to_sparsify = find_gelu_activations(model, 'mha_projections')
@@ -679,7 +688,7 @@ def load_model(args, exp_name: str, exp_id: str, device: Union[torch.device, str
     state_dict = run_states[0]['model_state']
     model.load_state_dict(state_dict)
     logging.info(f'Model for {original_exp_name}_{original_exp_id} loaded successfully')
-    return model, run_args[0], run_states[0]
+    return model, run_args[0], run_states[0], var_wo_ddp
 
 
 def accelerate_launcher(function, num_processes=None, mixed_precision="no", use_port="29500"):

@@ -269,7 +269,7 @@ def get_var_d16():
     var: DDP = (DDP if dist.initialized() else NullDDP)(var_wo_ddp, device_ids=[dist.get_local_rank()], find_unused_parameters=False, broadcast_buffers=False)
     
 
-    return var
+    return var, var_wo_ddp
 
 def compile_model(m, fast):
     if fast == 0:

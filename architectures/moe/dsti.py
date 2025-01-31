@@ -13,7 +13,7 @@ from architectures.custom import create_attention_projection_filter_condition, C
 from architectures.vit import MLP
 from architectures.gpt import MLP as GPTMLP, GPT
 from utils import find_module_names, get_module_by_name, set_module_by_name, get_module_name, get_parent_module_name
-from architectures.basic_var import SelfAttention
+from architectures.basic_var import SelfAttention, FFN
 
 
 class SubstitutionMLP(torch.nn.Module):
@@ -143,8 +143,6 @@ def replace_mha_projections(original_model: nn.Module,
     #     modules_to_replace += find_module_names(original_model,
     #                                             create_attention_projection_filter_condition('v_proj'))
     # print(o_proj, q_proj, k_proj, v_proj)
-    # print(find_module_names(original_model, create_attention_projection_filter_condition('proj')))
-    # print(find_module_names(original_model, create_attention_projection_filter_condition('mat_qkv')))
     if o_proj:
         modules_to_replace += find_module_names(original_model, create_attention_projection_filter_condition('proj'))
     if q_proj and k_proj and v_proj:
@@ -173,7 +171,7 @@ def replace_mha_projections(original_model: nn.Module,
 
 
 def dsti_mlp_filter_condition(_model: nn.Module, m: nn.Module):
-    if isinstance(m, (MLP, TorchvisionMLP, SubstitutionMLP, GPTMLP, BertLayer, GemmaMLP)):
+    if isinstance(m, (MLP, TorchvisionMLP, SubstitutionMLP, GPTMLP, BertLayer, GemmaMLP, FFN)):
         return True
 
 
@@ -182,7 +180,7 @@ def eligible_gelu_activation_filter(model: nn.Module, m: nn.Module):
     m_name = get_module_name(model, m)
     parent_module = get_module_by_name(model, get_parent_module_name(m_name))
     if isinstance(m, (nn.GELU, PytorchGELUTanh)) and isinstance(parent_module, (
-    MLP, TorchvisionMLP, SubstitutionMLP, GPTMLP, BertLayer, GemmaMLP)):
+    MLP, TorchvisionMLP, SubstitutionMLP, GPTMLP, BertLayer, GemmaMLP, FFN)):
         return True
 
 
@@ -204,6 +202,7 @@ def mha_gelu_activation_filter(model: nn.Module, m: nn.Module):
 
 
 def find_gelu_activations(model, apply_to):
+    print(f"apply_to: {apply_to}")
     if apply_to == 'moe_eligible_only':
         acts_to_sparsify = find_module_names(model, eligible_gelu_activation_filter)
     elif apply_to == 'everywhere':
