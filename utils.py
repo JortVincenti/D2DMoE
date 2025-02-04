@@ -569,10 +569,13 @@ def retrieve_final(args, run_name: str, device: Union[torch.device, str] = 'cpu'
         final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_mha_rep_distill_MFR6DQD4_1/final.pth') # Jort: Final DSTI path
     elif 'enforce_sparsity' in run_name:
         final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_enforce_sparsity_C5DOGOFE_1/final.pth') # Jort: Final enforce sparsity path
+    elif 'dsti_expert_split' in run_name:
+        final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_dsti_expert_split_4KAHVWXI_1/final.pth') # Jort: Final DSTI expert split path
+    elif 'dsti_router' in run_name:
+        final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_dsti_router_XOPFHBXX_1/final.pth') # Jort: Final DSTI router path
     else:
         final_path = args.runs_dir / run_name / 'final.pth'
     if final_path.exists() and final_path.is_file():
-        logging.info(f'Loading final state for {run_name} from {str(final_path)}')
         final_state = torch.load(final_path, map_location=device)
     else:
         raise FileNotFoundError('Cannot find the final.pth file')
@@ -598,7 +601,7 @@ def load_model(args, exp_name: str, exp_id: str, device: Union[torch.device, str
     run_model_args = []
     original_exp_name = exp_name
     original_exp_id = exp_id
-    while exp_name is not None: #Jort: To avoid infinite loop
+    while exp_name is not None:
         state = retrieve_final(args, f'{exp_name}_{exp_id}', device)
         arg = state['args']
         model_arg = arg.model_args
@@ -607,7 +610,8 @@ def load_model(args, exp_name: str, exp_id: str, device: Union[torch.device, str
         run_model_args.append(model_arg)
         exp_name = arg.base_on if hasattr(arg, 'base_on') else None
         exp_id = arg.exp_id
-
+    
+    print('Done with loading states')
     # create model from the most nested base model
     for arg, model_arg in zip(reversed(run_args), reversed(run_model_args)):
         print(f'Creating model for {arg.model_class} with args: {model_arg}')
@@ -679,13 +683,17 @@ def load_model(args, exp_name: str, exp_id: str, device: Union[torch.device, str
         elif arg.model_class == 'dsti_router':
             # TODO refactor this so that no duplication here is needed
             from architectures.moe.moefication import add_routers
+            print("Adding routers")
             add_routers(model, model_arg)
+            print("Added routers")
             model = model.to(device)
+            print("Model to device")
         else:
             model_arg = {'base_model': model, **model_arg}
             model = create_model(arg.model_class, model_arg).to(device)
     # state loading is only necessary for the model being loaded
     state_dict = run_states[0]['model_state']
+    print(f'Loading model for {original_exp_name}_{original_exp_id}')
     model.load_state_dict(state_dict)
     logging.info(f'Model for {original_exp_name}_{original_exp_id} loaded successfully')
     return model, run_args[0], run_states[0], var_wo_ddp

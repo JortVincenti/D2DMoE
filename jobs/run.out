@@ -16,39 +16,39 @@ on the system, please use 'module avail' or 'module spider' to search for it.
 rm: refusing to remove '.' or '..' directory: skipping 'shared/results/effbench_logs/.'
 rm: refusing to remove '.' or '..' directory: skipping 'shared/results/effbench_logs/..'
 [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
-[01-31 22:42:49] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
-[01-31 22:42:49] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
-[01-31 22:42:49] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
-[01-31 22:42:50] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
-[01-31 22:42:49] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
-[01-31 22:42:49] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
-[01-31 22:42:49] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
-[01-31 22:42:49] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
-[01-31 22:42:49] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
-[01-31 22:42:49] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
-[01-31 22:42:49] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
-[01-31 22:42:49] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
-[01-31 22:42:49] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
-[01-31 22:42:49] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
-[01-31 22:42:49] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
-[01-31 22:42:49] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
-[01-31 22:42:50] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
-[01-31 22:42:50] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
-[01-31 22:42:50] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
-[01-31 22:42:50] (oE/scripts/d2dmoe_var.py, line 350)=> Exp names: ['TINYIMAGENET_PATH_var_d16_3DMBB7CJ', 'TINYIMAGENET_PATH_mha_rep_distill_TTXY26X4', 'TINYIMAGENET_PATH_enforce_sparsity_OGIPQAFX', 'TINYIMAGENET_PATH_dsti_expert_split_B2GUJQVI', 'TINYIMAGENET_PATH_dsti_router_MZTXXAUW']
-[01-31 22:42:50] (oE/scripts/d2dmoe_var.py, line 351)=> Display names: ['VAR', 'MHA distillation', 'Sparsity enforcement', 'DSTI expert split', 'DSTI']
-[01-31 22:42:50] (oE/scripts/d2dmoe_var.py, line 352)=> SLURM JIDs: ['9717338']
+[02-04 23:38:26] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
+[02-04 23:38:26] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
+[02-04 23:38:26] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
+[02-04 23:38:26] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
+[02-04 23:38:26] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[02-04 23:38:26] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[02-04 23:38:26] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[02-04 23:38:26] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[02-04 23:38:26] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[02-04 23:38:26] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[02-04 23:38:26] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[02-04 23:38:26] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[02-04 23:38:26] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[02-04 23:38:26] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[02-04 23:38:26] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[02-04 23:38:26] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[02-04 23:38:26] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[02-04 23:38:26] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[02-04 23:38:26] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[02-04 23:38:26] (oE/scripts/d2dmoe_var.py, line 350)=> Exp names: ['TINYIMAGENET_PATH_var_d16_MQWFVKRM', 'TINYIMAGENET_PATH_mha_rep_distill_ZZEYF6VB', 'TINYIMAGENET_PATH_enforce_sparsity_LTCYPYXW', 'TINYIMAGENET_PATH_dsti_expert_split_O7HDH7XG', 'TINYIMAGENET_PATH_dsti_router_6XU5AM7Y']
+[02-04 23:38:26] (oE/scripts/d2dmoe_var.py, line 351)=> Display names: ['VAR', 'MHA distillation', 'Sparsity enforcement', 'DSTI expert split', 'DSTI']
+[02-04 23:38:26] (oE/scripts/d2dmoe_var.py, line 352)=> SLURM JIDs: []
 
 JOB STATISTICS
 ==============
-Job ID: 9717333
+Job ID: 9772844
 Cluster: snellius
 User/Group: jvincenti/jvincenti
 State: COMPLETED (exit code 0)
 Nodes: 1
 Cores per node: 18
-CPU Utilized: 00:00:09
-CPU Efficiency: 2.27% of 00:06:36 core-walltime
-Job Wall-clock time: 00:00:22
-Memory Utilized: 2.45 MB
+CPU Utilized: 00:00:10
+CPU Efficiency: 2.06% of 00:08:06 core-walltime
+Job Wall-clock time: 00:00:27
+Memory Utilized: 2.22 MB
 Memory Efficiency: 0.00% of 120.00 GB

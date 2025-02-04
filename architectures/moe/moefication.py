@@ -17,7 +17,7 @@ from architectures.moe.moe_layers import MoELayer, MOE_IMPL_MAP, ModuleBatchedEx
     CustomKernelExperts
 from architectures.moe.moe_models import moe_vit_block_forward, moe_vit_encoder_forward, moe_vit_main_forward, \
     moe_attention_forward, moe_gpt_block_forward, moe_gpt_main_forward, moe_bert_layer_forward, moe_bert_main_forward, \
-    moe_gemma_main_forward, moe_gemma_decoder_forward
+    moe_gemma_main_forward, moe_gemma_decoder_forward, moe_var_block_forward, moe_var_main_forward
 from architectures.nlp import GemmaWrapper
 from architectures.vit import VisionTransformer as CustomVisionTransformer
 from architectures.gpt import GPT, MLP as GPTMLP
@@ -205,10 +205,10 @@ def replace_with_moes(original_model: nn.Module, num_experts: int = None, expert
     elif isinstance(model, NullDDP) or isinstance(getattr(model, 'module', None), NullDDP):
         model = model.module
         for i in range(len(model.blocks)):
-            model.blocks[i].forward = partial(moe_vit_block_forward, model.blocks[i])
+            model.blocks[i].forward = partial(moe_var_block_forward, model.blocks[i])
             # if isinstance(model.blocks[i].attn, CustomMultiheadAttention): # TODO
             #     model.blocks[i].attn.forward = partial(moe_attention_forward, model.blocks[i].attn)
-        model.forward = partial(moe_vit_main_forward, model)
+        model.forward = partial(moe_var_main_forward, model)
 
     else:
         raise ValueError(f'Unsupported model type: {type(model)}')
@@ -329,29 +329,113 @@ def split_original_parameters(original_model: nn.Module, moe_model: nn.Module, r
         param_clustering_split(original_module, moe_module)
 
 
+# class MoeficationRouter(nn.Module):
+#     def __init__(self, hidden_dim, num_experts, width=128, depth=2, bias=False, activation='tanh',
+#                  output_activation='identity', test_override_outputs_p=None):
+#         super().__init__()
+#         self.layers = nn.ModuleList()
+#         if depth == 1:
+#             self.layers.append(nn.Linear(hidden_dim, num_experts, bias=bias))
+#         else:
+#             self.layers.append(nn.Linear(hidden_dim, width, bias=bias))
+#             self.layers.append(ACTIVATION_NAME_MAP[activation]())
+#             for i in range(depth - 2):
+#                 self.layers.append(nn.Linear(width, width, bias=bias))
+#                 self.layers.append(ACTIVATION_NAME_MAP[activation]())
+#             self.layers.append(nn.Linear(width, num_experts, bias=bias))
+#         self.layers.append(ACTIVATION_NAME_MAP[output_activation]())
+#         self.test_override_outputs_p = test_override_outputs_p
+#         if test_override_outputs_p is not None:
+#             self.response_cache = {}
+
 class MoeficationRouter(nn.Module):
     def __init__(self, hidden_dim, num_experts, width=128, depth=2, bias=False, activation='tanh',
                  output_activation='identity', test_override_outputs_p=None):
         super().__init__()
         self.layers = nn.ModuleList()
+
         if depth == 1:
             self.layers.append(nn.Linear(hidden_dim, num_experts, bias=bias))
         else:
             self.layers.append(nn.Linear(hidden_dim, width, bias=bias))
             self.layers.append(ACTIVATION_NAME_MAP[activation]())
+
             for i in range(depth - 2):
                 self.layers.append(nn.Linear(width, width, bias=bias))
                 self.layers.append(ACTIVATION_NAME_MAP[activation]())
+
             self.layers.append(nn.Linear(width, num_experts, bias=bias))
+        
         self.layers.append(ACTIVATION_NAME_MAP[output_activation]())
         self.test_override_outputs_p = test_override_outputs_p
         if test_override_outputs_p is not None:
             self.response_cache = {}
 
+        # Initialize weights properly
+        self._initialize_weights(activation)
+
+    def _initialize_weights(self, activation):
+        """ Proper weight initialization depending on activation type """
+        for layer in self.layers:
+            if isinstance(layer, nn.Linear):
+                if activation in ['relu', 'leaky_relu', 'gelu']:
+                    nn.init.kaiming_uniform_(layer.weight, nonlinearity='relu')
+                elif activation in ['tanh', 'sigmoid']:
+                    nn.init.xavier_uniform_(layer.weight)
+                else:
+                    nn.init.kaiming_uniform_(layer.weight, nonlinearity='linear')  # Default
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+
     def forward(self, x):
-        for l in self.layers:
-            x = l(x)
-        if self.test_override_outputs_p is not None:
+        # Print initialization info for Linear layers
+        # for idx, layer in enumerate(self.layers):
+        #     if isinstance(layer, nn.Linear):
+        #         print(f"Initialized layer {idx} (Linear):")
+        #         print(f"  Weight: min: {layer.weight.data.min().item():.4f}, max: {layer.weight.data.max().item():.4f}, "
+        #               f"mean: {layer.weight.data.mean().item():.4f}, std: {layer.weight.data.std().item():.4f}")
+        #         if layer.bias is not None:
+        #             print(f"  Bias: min: {layer.bias.data.min().item():.4f}, max: {layer.bias.data.max().item():.4f}, "
+        #                   f"mean: {layer.bias.data.mean().item():.4f}, std: {layer.bias.data.std().item():.4f}")
+
+        # Print input statistics
+        # print("Router input:")
+        # print(f"  shape: {x.shape}")
+        # print(f"  min: {x.min().item():.4f}, max: {x.max().item():.4f}, "
+        #     f"mean: {x.mean().item():.4f}, std: {x.std().item():.4f}")
+        
+        # Iterate through each layer, printing intermediate outputs and (optionally) layer weights
+        for idx, layer in enumerate(self.layers):
+            x = layer(x)
+            # print(f"After layer {idx} ({layer.__class__.__name__}):")
+            # print(f"  shape: {x.shape}")
+            # print(f"  min: {x.min().item():.4f}, max: {x.max().item():.4f}, "
+            #     f"mean: {x.mean().item():.4f}, std: {x.std().item():.4f}")
+            
+            # # Optionally, print layer parameters if it is a Linear layer:
+            # if isinstance(layer, nn.Linear):
+            #     weight = layer.weight.data
+            #     bias = layer.bias.data if layer.bias is not None else None
+            #     print(f"  Weight: min: {weight.min().item():.4f}, max: {weight.max().item():.4f}, "
+            #         f"mean: {weight.mean().item():.4f}, std: {weight.std().item():.4f}")
+            #     if bias is not None:
+            #         print(f"  Bias: min: {bias.min().item():.4f}, max: {bias.max().item():.4f}, "
+            #             f"mean: {bias.mean().item():.4f}, std: {bias.std().item():.4f}")
+        
+        # Print final output statistics
+        # print("Final router output:")
+        # print(f"  shape: {x.shape}")
+        # print(f"  min: {x.min().item():.4f}, max: {x.max().item():.4f}, "
+        #     f"mean: {x.mean().item():.4f}, std: {x.std().item():.4f}")
+        # num_zeros = (x == 0).sum().item()
+        # total = x.numel()
+        # print(f"  zeros: {num_zeros}/{total} ({(num_zeros/total)*100:.2f}%)")
+        
+        
+        # for l in self.layers:
+        #     x = l(x)
+
+        if self.test_override_outputs_p is not None: # Jort: This is not used
             cache_key = (x.size(0), x.size(1))
             if cache_key in self.response_cache:
                 x = self.response_cache[cache_key]
@@ -359,6 +443,7 @@ class MoeficationRouter(nn.Module):
                 with torch.no_grad():
                     x.bernoulli_(self.test_override_outputs_p)
                     self.response_cache[cache_key] = x
+
         return x
 
 

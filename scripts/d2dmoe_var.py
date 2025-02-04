@@ -54,7 +54,7 @@ def main():
     # partition = 'rtx3080'
     # partition = 'batch'
 
-    timeout = 60 #60 * 24 * 7
+    timeout = 10 #60 * 24 * 7
     # timeout = 60 * 24 * 2
 
     gpus_per_task = 1
@@ -276,14 +276,14 @@ def main():
             args.base_on = base_on_exp_name
             exp_name, run_name = generate_run_name(args)
             base_run_name = f'{base_on_exp_name}_{exp_id}'
-            if base_run_name in run_to_job_map:
-                dependency_str = f"afterany:{run_to_job_map[base_run_name].job_id}"
-                executor.update_parameters(slurm_additional_parameters={"dependency": dependency_str})
-            else:
-                executor.update_parameters(slurm_additional_parameters={})
-            job = submit_job(executor, dsti_expert_split, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
-            jobs.append(job)
-            run_to_job_map[run_name] = job
+            # if base_run_name in run_to_job_map:
+            #     dependency_str = f"afterany:{run_to_job_map[base_run_name].job_id}"
+            #     executor.update_parameters(slurm_additional_parameters={"dependency": dependency_str})
+            # else:
+            #     executor.update_parameters(slurm_additional_parameters={})
+            # job = submit_job(executor, dsti_expert_split, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
+            # jobs.append(job)
+            # run_to_job_map[run_name] = job
         exp_names.append(exp_name)
         base_split_exp_names.append(exp_names[-1])
         display_names.append(f'DSTI expert split')
@@ -295,8 +295,8 @@ def main():
 
     dsti_routing_args = deepcopy(common_args)
     dsti_routing_args.model_class = 'dsti_router'
-    dsti_routing_args.router_loss_type = 'mse'
-    dsti_routing_args.epochs = 3 #7
+    dsti_routing_args.router_loss_type = 'huber' #'mse'
+    dsti_routing_args.epochs = 1
     # dsti_routing_args.epochs = 0.1
     # dsti_routing_args.batch_size = 256
     dsti_routing_args.batch_size = 128
@@ -409,6 +409,7 @@ def main():
 
     # ════════════════════════ dsti analysis ════════════════════════ #
     # Jort HEre
+    plot_args = deepcopy(common_args)
     plot_args = get_default_moe_image_spatial_load_args()
     plot_args.output_dir = output_dir / 'spatial_load'
     plot_args.runs_dir = common_args.runs_dir
@@ -416,19 +417,19 @@ def main():
     plot_args.exp_ids = exp_ids
     plot_args.display_names = display_names
     valid_set_len = 1000
-    images_to_draw = 2
+    images_to_draw = 1
     plot_args.data_indices = [round(i / images_to_draw * (valid_set_len - 1)) for i in range(images_to_draw)]
     plot_args.num_cheapest = 1
-    plot_args.num_costliest = 1
-    plot_args.batch_size = 32
+    plot_args.num_costliest = 0
+    plot_args.batch_size = 16 #32
     plot_args.dsti_tau = 0.9975
     plot_args.use_wandb = False
-    # if jobs:
-    #     dependency_str = f'afterany:{":".join(job.job_id for job in jobs)}'  # wait for all jobs to finish before plotting
-    #     executor.update_parameters(slurm_additional_parameters={"dependency": dependency_str})
-    # else:
-    #     executor.update_parameters(slurm_additional_parameters={})
-    # submit_job(executor, dsti_spatial_load_plot, plot_args, num_gpus=1, gpu_type=gpu_type)
+    if jobs:
+        dependency_str = f'afterany:{":".join(job.job_id for job in jobs)}'  # wait for all jobs to finish before plotting
+        executor.update_parameters(slurm_additional_parameters={"dependency": dependency_str})
+    else:
+        executor.update_parameters(slurm_additional_parameters={})
+    submit_job(executor, dsti_spatial_load_plot, plot_args, num_gpus=1, gpu_type=gpu_type)
 
 
 if __name__ == '__main__':

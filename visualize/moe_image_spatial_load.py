@@ -12,10 +12,38 @@ from architectures.moe.moefication import MoeficationMoE
 from data_utils.data import DATASETS_NAME_MAP
 from eval import benchmark_moe
 from utils import load_model, get_loader
-
+from utils_var import arg_util
+from train import setup_data, TrainingContext, setup_accelerator
+from common import get_default_args as original_get_default_args
+import os
 
 def get_default_args():
-    default_args = OmegaConf.create()
+    
+    default_args = original_get_default_args()
+    # exp_ids = [1, 2, 3]
+    exp_ids = [1]
+    default_args.runs_dir = Path(os.environ['RUNS_DIR'])
+    default_args.dataset = 'TINYIMAGENET_PATH' #'imagenet'
+    default_args.dataset_args = {}
+    default_args.dataset_args.variant = 'deit3_rrc'# deit3 Jort added this would be for the train class to work for tiny deit3
+    default_args.mixup_alpha = None #0.8
+    default_args.cutmix_alpha = None #1.0
+    default_args.mixup_smoothing = 0.1
+    default_args.batch_size = 16 #128
+    default_args.loss_type = 'ce'
+    default_args.loss_args = {}
+    default_args.optimizer_class = 'adam'
+    default_args.optimizer_args = {}
+    default_args.optimizer_args.lr = 0.001
+    default_args.optimizer_args.weight_decay = 0.0
+    default_args.scheduler_class = 'cosine' #Jort: This should be 'linear'
+    default_args.scheduler_args = {}
+    default_args.scheduler_args.eta_min = 1e-6
+    default_args.clip_grad_norm = 1.0
+    default_args.epochs = 5
+    default_args.eval_points = 20
+    default_args.use_wandb = False
+    default_args.mixed_precision = None
     default_args.runs_dir = Path.cwd() / 'runs'  # Root dir where experiment data was saved.
     default_args.exp_names = []  # Unique experiment names to visualize the results for (excluding exp_id).
     default_args.exp_ids = [0]  # Experiment ids.
@@ -172,17 +200,19 @@ def process_dataset(accelerator, model, data_loader, number_with_least_compute, 
     return selected_samples, least_compute, most_compute
 
 
-def setup_and_process(args, model, run_args, accelerator):
+def setup_and_process(args, model, run_args, accelerator, tc):
     dataset = args.dataset if args.dataset is not None else run_args.dataset
     dataset_args = args.dataset_args if args.dataset_args is not None else run_args.dataset_args
-    _, _, data = DATASETS_NAME_MAP[dataset](**dataset_args)
-    logging.info(f'Testset size: {len(data)}')
-    dataloader = get_loader(data, run_args.batch_size if args.batch_size is None else args.batch_size, accelerator,
-                            shuffle=False)
-    normalization_transform = get_normalization_transform(data)
+    # _, _, data = DATASETS_NAME_MAP[dataset](**dataset_args)
+    # logging.info(f'Testset size: {len(data)}')
+    # dataloader = get_loader(data, run_args.batch_size if args.batch_size is None else args.batch_size, accelerator,
+    #                         shuffle=False)
+    
+    setup_data(args, tc)
+    #normalization_transform = get_normalization_transform(data)
     selected_samples, least_compute, most_compute = process_dataset(accelerator,
                                                                     model,
-                                                                    dataloader,
+                                                                    tc.val_loader,
                                                                     args.num_cheapest,
                                                                     args.num_costliest,
                                                                     args.data_indices,
@@ -297,7 +327,7 @@ def generate_spatial_load_figure(x, _pred, _label, spatial_load, patch_size, nor
         # fig.suptitle(f'prediction: {pred.argmax()} label: {label}')
         fig.set_tight_layout(True)
         return fig
-
+import gc
 
 def main(args):
     logging.basicConfig(
@@ -308,19 +338,40 @@ def main(args):
         handlers=[logging.StreamHandler()],
         force=True,
     )
+    args: arg_util.Args = arg_util.init_dist_and_get_args(args)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     display_names = args.display_names if args.display_names is not None else args.exp_names
     accelerator = Accelerator(split_batches=True)
+
     for exp_name, display_name in zip(args.exp_names, display_names):
         for exp_id in args.exp_ids:
-            model, run_args, state = load_model(args, exp_name, exp_id)
+            model, run_args, state, _= load_model(args, exp_name, exp_id)
             if run_args.model_class != 'dsti_router':
                 logging.info(f'{exp_name}_{exp_id} is not a dynamic-k MoE model - skipping.')
+
+                # Move to CPU and delete all references
+                model.to('cpu')
+                del model
+                del run_args
+                del state
+                del _
+
+                for obj in list(globals().values()):
+                    if isinstance(obj, torch.Tensor) and obj.device.type == "cuda":
+                        del obj
+
+                gc.collect()
+                torch.cuda.empty_cache()
+                continue
             else:
-                model = accelerator.prepare(model)
+                print(f'Preparing model for: {exp_name}_{exp_id}')
+                tc = TrainingContext()
+                setup_accelerator(args, tc)
+                model = tc.accelerator.prepare(model)
+                
                 logging.info(f'Generating patch selection plots for: {exp_name}_{exp_id}')
                 selected_samples, least_compute, most_compute, patch_size, normalization_transform, loader = \
-                    setup_and_process(args, model, run_args, accelerator)
+                    setup_and_process(args, model, run_args, accelerator, tc)
                 assert selected_samples['x'].size(0) == len(args.data_indices), f'{selected_samples}'
                 named_sets = [('selected', selected_samples), ('cheapest', least_compute), ('costliest', most_compute)]
                 for name, tensor_set in named_sets:
