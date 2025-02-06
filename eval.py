@@ -15,6 +15,7 @@ from architectures.vit import MLP as CustomMLP
 from architectures import VAR
 from utils import flop_count, get_module_by_name, remove_hooks, find_module_names, add_save_activations_hook
 #import utils
+import dist
 
 from trainer import VARTrainer
 
@@ -492,7 +493,7 @@ def benchmark_with_sample(model: torch.nn.Module,
             m.train()
     #
     with torch.inference_mode():
-        model_costs = flop_count(model, (sample,))
+        model_costs = flop_count(model, (sample))
         param_count = parameter_count(model)
     # logging.info(f'Ops by operator:\n{model_costs.by_operator()}')
     # logging.info(f'Ops by module:\n{flop_count_table(model_costs, max_depth=7)}')
@@ -509,12 +510,20 @@ def benchmark_with_sample(model: torch.nn.Module,
 
 
 def benchmark(model: torch.nn.Module,
-              data_loader: torch.utils.data.DataLoader) -> Tuple[FlopCountAnalysis, Dict]:
-    X, _ = next(iter(data_loader))
-    if isinstance(X, dict):
-        sample = {k: v[:1] for k, v in X.items()}
-    else:
-        sample = X[:1]
+              data_loader: torch.utils.data.DataLoader, tc) -> Tuple[FlopCountAnalysis, Dict]:
+    X, y = next(iter(data_loader))
+    X = X[:1]
+    y = y[:1]
+
+    with torch.no_grad():
+        B, V = y.shape[0], tc.model_vae.vocab_size
+        X = X.to(dist.get_device(), non_blocking=True)
+        label_B = y.to(dist.get_device(), non_blocking=True)
+        gt_idx_Bl: List[ITen] = tc.model_vae.img_to_idxBl(X) # This does not return None
+        x_BLCv_wo_first_l: Ten = tc.model_vae.quantize.idxBl_to_var_input(gt_idx_Bl)
+    
+    sample = (label_B, x_BLCv_wo_first_l)
+
     return benchmark_with_sample(model, sample)
 
 
@@ -551,9 +560,9 @@ def benchmark_earlyexiting(model: torch.nn.Module,
 
 
 def benchmark_moe(model: torch.nn.Module,
-                  data_loader: torch.utils.data.DataLoader):
+                  data_loader: torch.utils.data.DataLoader, tc=None):
     from architectures.moe.moe_layers import MoELayer, ExecuteAllExperts, ModuleBatchedExperts, CustomKernelExperts
-    model_costs, model_params = benchmark(model, data_loader)
+    model_costs, model_params = benchmark(model, data_loader, tc)
     # find MoE modules and order them
     moe_module_names = find_module_names(model, lambda _, m: isinstance(m, MoELayer))
     # add hooks on gating networks and expert modules
@@ -571,12 +580,23 @@ def benchmark_moe(model: torch.nn.Module,
     # expert_to_module_mapping = {v: k for k, v in experts_module_names.items()}
     experts_inputs, _, experts_handles = add_save_activations_hook(model, expert_module_name_list)
     # push an example though forward
-    X, _ = next(iter(data_loader))
+    X, y = next(iter(data_loader))
     if isinstance(X, dict):
         sample = {k: v[:1] for k, v in X.items()}
     else:
         sample = X[:1]
-    _ = model(sample).detach()
+
+    with torch.no_grad():           
+        B, V = y.shape[0], tc.model_vae.vocab_size
+        X = X.to(dist.get_device(), non_blocking=True)
+        label_B = y.to(dist.get_device(), non_blocking=True)
+        gt_idx_Bl: List[ITen] = tc.model_vae.img_to_idxBl(X) # This does not return None
+        x_BLCv_wo_first_l: Ten = tc.model_vae.quantize.idxBl_to_var_input(gt_idx_Bl)
+        
+    
+    model(label_B, x_BLCv_wo_first_l).detach()
+
+    print("model_costs", model_costs)
     # push a single sample though each of the modules and calculate its costs
     cost_without_experts = model_costs.total()
     expert_costs = {}

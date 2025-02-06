@@ -49,12 +49,12 @@ def main():
     qos = None
 
     # partition = 'plgrid-gpu-a100'
-    partition = 'gpu'
+    partition = 'gpu_h100'
     # partition = 'dgx'
     # partition = 'rtx3080'
     # partition = 'batch'
 
-    timeout = 10 #60 * 24 * 7
+    timeout = 20 #60 * 24 * 7
     # timeout = 60 * 24 * 2
 
     gpus_per_task = 1

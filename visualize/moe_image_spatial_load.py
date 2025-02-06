@@ -13,9 +13,10 @@ from data_utils.data import DATASETS_NAME_MAP
 from eval import benchmark_moe
 from utils import load_model, get_loader
 from utils_var import arg_util
-from train import setup_data, TrainingContext, setup_accelerator
+from train import setup_data, TrainingContext, setup_accelerator, make_vae
 from common import get_default_args as original_get_default_args
 import os
+import dist
 
 def get_default_args():
     
@@ -86,15 +87,15 @@ def set_for_eval_with_dynk(model, tau, mode='dynk_max'):
             m.tau = tau
 
 
-def get_moe_costs(accelerator, model, loader):
+def get_moe_costs(accelerator, model, loader, tc):
     unwrapped_model = accelerator.unwrap_model(model)
     set_for_eval_with_topk(unwrapped_model)
-    cost_without_experts, token_expert_costs, _ = benchmark_moe(unwrapped_model, loader)
+    cost_without_experts, token_expert_costs, _ = benchmark_moe(unwrapped_model, loader, tc)
     return cost_without_experts, token_expert_costs
 
 
-def compute_spatial_load(accelerator, model, loader, gating_data):
-    _, token_expert_costs = get_moe_costs(accelerator, model, loader)
+def compute_spatial_load(accelerator, model, loader, gating_data, tc):
+    _, token_expert_costs = get_moe_costs(accelerator, model, loader, tc)
     any_moe_gating_data = next(iter(gating_data.values()))
     device = any_moe_gating_data.device
     spatial_load = torch.zeros(any_moe_gating_data.size(0), any_moe_gating_data.size(1), device=device,
@@ -158,41 +159,54 @@ def merge_selected_samples(tensor_dict, costs, x, y, y_pred, gating_data, indice
 
 
 def process_dataset(accelerator, model, data_loader, number_with_least_compute, number_with_most_compute, data_indices,
-                    tau):
+                    tau, tc):
     assert isinstance(tau, float) and 0.0 < tau <= 1.0, f'{tau=}'
     data_indices = set(data_indices)
     least_compute = {}
     most_compute = {}
     selected_samples = {}
-    cost_without_experts, token_expert_costs = get_moe_costs(accelerator, model, data_loader)
+    cost_without_experts, token_expert_costs = get_moe_costs(accelerator, model, data_loader, tc)
     set_for_eval_with_dynk(model, tau)
     current_index = 0
     with torch.no_grad():
-        for x, y in data_loader:
-            y_pred, gating_data = model(x, return_gating_data=True)
+        for X, y in data_loader:
+            with torch.no_grad():           
+                B, V = y.shape[0], tc.model_vae.vocab_size
+                X = X.to(dist.get_device(), non_blocking=True)
+                label_B = y.to(dist.get_device(), non_blocking=True)
+                gt_idx_Bl: List[ITen] = tc.model_vae.img_to_idxBl(X) # This does not return None
+                x_BLCv_wo_first_l = tc.model_vae.quantize.idxBl_to_var_input(gt_idx_Bl)
+            print(f'X: {X.shape}, y: {y.shape}, x_BLCv_wo_first_l: {x_BLCv_wo_first_l.shape}')
+            y_pred, gating_data = model(y, x_BLCv_wo_first_l, return_gating_data=True)
             # each element of gating_data_list is a tuple
             # because different MoEs classes can return more than simply the gating network's final outputs
             # we select only the final routing decisions
-            gating_data = {k: v[0] for k, v in gating_data.items()}
+            merged_gating_data = {}
+            for d in gating_data:
+                merged_gating_data.update(d)
+
+
+            gating_data = {k.replace("module.", ""): v[0] for k, v in merged_gating_data.items()}
+
             # gating data should be a dict with tensor values of size (batch_size, sequence_length, num_experts) now
             y_pred, y, gating_data = accelerator.gather_for_metrics((y_pred, y, gating_data))
             # calculate computational cost for each sample
-            sample_costs = torch.zeros(x.size(0), device=x.device)
+            sample_costs = torch.zeros(X.size(0), device=X.device)
             for moe_name, moe_token_expert_cost in token_expert_costs.items():
                 executed_expert_tokens = (gating_data[moe_name] > 0.0).long().sum(dim=(1, 2))
                 total_expert_tokens = gating_data[moe_name].size(1) * gating_data[moe_name].size(2)
                 sample_costs += executed_expert_tokens / total_expert_tokens * moe_token_expert_cost
             # merge current batch to find samples with least and most compute
-            merge_by_costs(least_compute, sample_costs, x, y, y_pred, gating_data, number_with_least_compute, False)
-            merge_by_costs(most_compute, sample_costs, x, y, y_pred, gating_data, number_with_most_compute, True)
+            merge_by_costs(least_compute, sample_costs, X, y, y_pred, gating_data, number_with_least_compute, False)
+            merge_by_costs(most_compute, sample_costs, X, y, y_pred, gating_data, number_with_most_compute, True)
             # accumulate "selected" images
-            indices_current_batch = set(range(current_index, current_index + x.size(0)))
-            current_index += x.size(0)
+            indices_current_batch = set(range(current_index, current_index + X.size(0)))
+            current_index += X.size(0)
             indices_to_select = data_indices & indices_current_batch
-            indices_to_select = [i % x.size(0) for i in indices_to_select]
+            indices_to_select = [i % X.size(0) for i in indices_to_select]
             if len(indices_to_select) > 0:
-                indices_to_select = torch.tensor(indices_to_select, device=x.device)
-                merge_selected_samples(selected_samples, sample_costs, x, y, y_pred, gating_data, indices_to_select)
+                indices_to_select = torch.tensor(indices_to_select, device=X.device)
+                merge_selected_samples(selected_samples, sample_costs, X, y, y_pred, gating_data, indices_to_select)
             if number_with_most_compute == 0 and \
                     number_with_least_compute == 0 and \
                     selected_samples['x'].size(0) >= len(data_indices):
@@ -209,26 +223,44 @@ def setup_and_process(args, model, run_args, accelerator, tc):
     #                         shuffle=False)
     
     setup_data(args, tc)
-    #normalization_transform = get_normalization_transform(data)
+    normalization_transform = "normalize_01_into_pm1"
+
     selected_samples, least_compute, most_compute = process_dataset(accelerator,
                                                                     model,
                                                                     tc.val_loader,
                                                                     args.num_cheapest,
                                                                     args.num_costliest,
                                                                     args.data_indices,
-                                                                    args.dsti_tau)
-    patch_size = model.patch_size
-    return selected_samples, least_compute, most_compute, patch_size, normalization_transform, dataloader
+                                                                    args.dsti_tau, tc)
+    patch_size = args.patch_size
+    return selected_samples, least_compute, most_compute, patch_size, normalization_transform, tc.val_loader
 
+
+# def denormalize_image(image, normalization_transform):
+#     mean = normalization_transform.mean
+#     std = normalization_transform.std
+#     de_mean = [-m / s for m, s in zip(mean, std)]
+#     de_std = [1.0 / s for s in std]
+#     denormalized_image = transforms.Normalize(de_mean, de_std)(image)
+#     return denormalized_image
 
 def denormalize_image(image, normalization_transform):
-    mean = normalization_transform.mean
-    std = normalization_transform.std
-    de_mean = [-m / s for m, s in zip(mean, std)]
-    de_std = [1.0 / s for s in std]
-    denormalized_image = transforms.Normalize(de_mean, de_std)(image)
-    return denormalized_image
+    """
+    Reverse image normalization.
 
+    - If `transforms.Normalize` was used, apply inverse normalization.
+    - If `normalize_01_into_pm1` was used, reverse it with (x + 1) / 2.
+    """
+    if normalization_transform == 'normalize_01_into_pm1':
+        return (image + 1) / 2  # Reverse (x * 2) - 1 → (x + 1) / 2
+    elif isinstance(normalization_transform, transforms.Normalize):
+        mean = normalization_transform.mean
+        std = normalization_transform.std
+        de_mean = [-m / s for m, s in zip(mean, std)]
+        de_std = [1.0 / s for s in std]
+        return transforms.Normalize(de_mean, de_std)(image)
+    else:
+        return image  # No normalization applied, return as-is
 
 def prepare_image_with_patch_selection(image, g_x, patch_size, normalization_transform):
     # g_x should be of size (seq_len) by now
@@ -255,20 +287,131 @@ def prepare_image_with_patch_selection(image, g_x, patch_size, normalization_tra
 
 
 
+# def prepare_patch_selection_heatmap(image, g_x, patch_size):
+#     # g_x should be of size (seq_len) by now
+#     assert g_x.dim() == 1, f'{g_x.size()=}'
+#     assert image.dim() == 3
+#     assert image.size(0) == 3
+#     patches_in_row = image.size(-1) // patch_size
+#     print(patches_in_row)
+#     print(image.size(-1))
+#     print(patch_size)
+#     print(g_x.size())
+#     heatmap = torch.empty(patches_in_row, patches_in_row, device=image.device)
+#     print(heatmap.size())
+#     for token_index, token_weight in enumerate(g_x):
+#         # class token is the first in the sequence
+#         if token_index > 0:
+#             token_index -= 1
+#             print(token_index)
+#             patch_x, patch_y = divmod(token_index, patches_in_row)
+#             print(patch_x, patch_y)
+#             heatmap[patch_x-1, patch_y-1] = token_weight
+#     return heatmap.numpy()
+
 def prepare_patch_selection_heatmap(image, g_x, patch_size):
-    # g_x should be of size (seq_len) by now
-    assert g_x.dim() == 1, f'{g_x.size()=}'
-    assert image.dim() == 3
-    assert image.size(0) == 3
-    patches_in_row = image.size(-1) // patch_size
-    heatmap = torch.empty(patches_in_row, patches_in_row, device=image.device)
-    for token_index, token_weight in enumerate(g_x):
-        # class token is the first in the sequence
-        if token_index > 0:
-            token_index -= 1
-            patch_x, patch_y = divmod(token_index, patches_in_row)
-            heatmap[patch_x, patch_y] = token_weight
-    return heatmap.numpy()
+    """
+    Prepares patch-selection heatmaps for either a single patch size
+    or multiple scales.
+
+    If `patch_size` is an int, this behaves as the original function
+    (returns a single heatmap).
+    If `patch_size` is a list of scales, it returns a list of heatmaps,
+    one for each scale.
+
+    Assumptions:
+    1) `g_x` is a 1D gating vector, possibly concatenated across scales.
+    2) The first token in each scale segment is a 'class token' and is skipped.
+    3) Each scale s uses s^2 patch tokens (plus 1 class token).
+    4) The original code subtracts 1 from both patch_x and patch_y. We keep
+       that for consistency, but be aware for `scale=1` this may lead to
+       indexing at [-1, -1].
+
+    Parameters
+    ----------
+    image : torch.Tensor
+        Image of shape (3, H, W).
+    g_x : torch.Tensor
+        1D gating vector. If multiple scales are used, it contains concatenated
+        segments: each scale has (1 + s^2) tokens (1 class token + s^2 patches).
+    patch_size : int or List[int]
+        - If int, the old single-scale behavior is used.
+        - If list of ints, treat each entry as a scale and slice g_x accordingly.
+
+    Returns
+    -------
+    Union[np.ndarray, List[np.ndarray]]
+        - If patch_size is an int, returns a single heatmap as a NumPy array.
+        - If patch_size is a list of scales, returns a list of NumPy arrays
+          (one per scale).
+    """
+    assert g_x.dim() == 1, f"{g_x.size()=}"
+    assert image.dim() == 3, "image must be [C,H,W]"
+    assert image.size(0) == 3, "image[0] must be 3 color channels (RGB)"
+    patch_size = [1,2,3,4,5,6,8,10,13,16]
+    # --- SINGLE SCALE BEHAVIOR (original code) ---
+    if isinstance(patch_size, int):
+        patches_in_row = image.size(-1) // patch_size
+        print(patches_in_row)
+        print(image.size(-1))
+        print(patch_size)
+        print(g_x.size())
+
+        heatmap = torch.empty(patches_in_row, patches_in_row, device=image.device)
+        print(heatmap.size())
+
+        for token_index, token_weight in enumerate(g_x):
+            # skip the first token as a "class token"
+            if token_index > 0:
+                token_index -= 1  # shift index
+                print(token_index)
+                patch_x, patch_y = divmod(token_index, patches_in_row)
+                print(patch_x, patch_y)
+                # original code subtracts 1 from patch_x/patch_y:
+                heatmap[patch_x - 1, patch_y - 1] = token_weight
+
+        return heatmap.cpu().numpy()
+
+    # --- MULTI-SCALE BEHAVIOR ---
+    else:
+        # patch_size is a list of scales, e.g. [1,2,3,4,5,6,8,10,13,16]
+        scales = patch_size
+        heatmaps = []
+        
+        # We'll slice `g_x` for each scale: each scale has 1 class token + s^2 patch tokens
+        offset = 0
+        H = image.size(-1)  # assuming square image => width = height
+
+        for s in scales:
+            patches_in_row = H // s
+            # for debugging/logging:
+            print(f"Preparing scale={s} -> patches_in_row={patches_in_row}")
+
+            # Allocate a 2D heatmap on the same device
+            heatmap = torch.empty(patches_in_row, patches_in_row, device=image.device)
+
+            # The first token is the class token => skip it
+            # Then we have s^2 patch tokens
+            # range of tokens for this scale segment:
+            scale_token_count = 1 + s*s  # (class token) + (s^2 patch tokens)
+            g_x_scale_segment = g_x[offset : offset + scale_token_count]
+            offset += scale_token_count
+
+            for token_index, token_weight in enumerate(g_x_scale_segment):
+                if token_index == 0:
+                    # skip class token
+                    continue
+                # shift index by 1 to align with patch positions
+                real_index = token_index - 1
+                patch_x, patch_y = divmod(real_index, patches_in_row)
+                # original code subtracts 1 from each dimension
+                heatmap[patch_x, patch_y] = token_weight
+
+            heatmaps.append(heatmap.cpu().numpy())
+
+        return heatmaps
+
+
 
 
 def prepare_image(image, normalization_transform):
@@ -294,25 +437,55 @@ def generate_spatial_load_figure(x, _pred, _label, spatial_load, patch_size, nor
         fig.set_tight_layout(True)
         return fig
     elif mode == 'separate':
+        # 1) Prepare the original image
         image = prepare_image(x, normalization_transform)
-        selection_heatmap = prepare_patch_selection_heatmap(x, spatial_load, patch_size)
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(32, 16))
-        ax1.imshow(image)
-        ax1.set_xticks([])
-        ax1.set_yticks([])
-        ax1.set_yticklabels([])
-        ax1.set_xticklabels([])
-        ax1.axis('off')
-        # ax2.imshow(selection_heatmap, cmap='inferno', interpolation='nearest', vmin=0.0, vmax=1.0)
-        ax2.imshow(selection_heatmap, cmap='inferno', interpolation='nearest', vmin=0.25, vmax=0.75)
-        # ax2.imshow(selection_heatmap, cmap='inferno', interpolation='nearest', norm='log')
-        # ax2.imshow(selection_heatmap, cmap='inferno', interpolation='nearest', norm='linear')
-        ax2.set_xticks([])
-        ax2.set_yticks([])
-        ax2.set_yticklabels([])
-        ax2.set_xticklabels([])
-        ax2.axis('off')
-        # fig.suptitle(f'prediction: {pred.argmax()} label: {label}')
+
+        # 2) Prepare a list of heatmaps (one per scale)
+        selection_heatmaps = prepare_patch_selection_heatmap(x, spatial_load, patch_size)
+        # ^ This should now return a list of 2D numpy arrays, not a single array.
+        import numpy as np
+        np.set_printoptions(threshold=100)
+        print("Heatmaps returned by `prepare_patch_selection_heatmap`:")
+
+        for i, hm in enumerate(selection_heatmaps, start=1):
+            print("********")
+            print(f"scale {i}")
+            # Print the entire 2D array for this scale
+            print(hm)
+            print("********")
+
+        # 3) Figure out a good color range for all scales (optional)
+        
+        all_vals = np.concatenate([hm.ravel() for hm in selection_heatmaps])
+        vmin, vmax = all_vals.min(), all_vals.max()
+
+        # 4) Create subplots: one for the image, plus one per heatmap
+        n_subplots = 1 + len(selection_heatmaps)
+        fig, axes = plt.subplots(1, n_subplots, figsize=(8 * n_subplots, 8))
+
+        # 5) Show the original image in the first subplot
+        ax_img = axes[0]
+        ax_img.imshow(image)
+        ax_img.axis('off')  # turn off tick labels
+        ax_img.set_title("Original image")
+
+        # 6) Show each scale's heatmap
+        last_imshow = None
+        for i, hm in enumerate(selection_heatmaps, start=1):
+            ax = axes[i]
+            last_imshow = ax.imshow(
+                hm, cmap='inferno', interpolation='nearest',
+                vmin=vmin, vmax=vmax
+            )
+            ax.axis('off')
+            ax.set_title(f"Scale Heatmap #{i}")
+
+        # 7) Optionally add a colorbar to the right
+        #    (this example places the colorbar in free space on the right side)
+        fig.subplots_adjust(right=0.9)
+        cbar_ax = fig.add_axes([0.92, 0.2, 0.02, 0.6])
+        fig.colorbar(last_imshow, cax=cbar_ax)
+
         fig.set_tight_layout(True)
         return fig
     elif mode == 'image_only':
@@ -342,10 +515,10 @@ def main(args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
     display_names = args.display_names if args.display_names is not None else args.exp_names
     accelerator = Accelerator(split_batches=True)
-
+    tc = TrainingContext()
     for exp_name, display_name in zip(args.exp_names, display_names):
         for exp_id in args.exp_ids:
-            model, run_args, state, _= load_model(args, exp_name, exp_id)
+            model, run_args, state, tc.model_var_wo_ddp= load_model(args, exp_name, exp_id)
             if run_args.model_class != 'dsti_router':
                 logging.info(f'{exp_name}_{exp_id} is not a dynamic-k MoE model - skipping.')
 
@@ -354,7 +527,6 @@ def main(args):
                 del model
                 del run_args
                 del state
-                del _
 
                 for obj in list(globals().values()):
                     if isinstance(obj, torch.Tensor) and obj.device.type == "cuda":
@@ -365,9 +537,10 @@ def main(args):
                 continue
             else:
                 print(f'Preparing model for: {exp_name}_{exp_id}')
-                tc = TrainingContext()
+                
                 setup_accelerator(args, tc)
                 model = tc.accelerator.prepare(model)
+                make_vae(args, tc)
                 
                 logging.info(f'Generating patch selection plots for: {exp_name}_{exp_id}')
                 selected_samples, least_compute, most_compute, patch_size, normalization_transform, loader = \
@@ -379,7 +552,7 @@ def main(args):
                     preds = tensor_set['y_pred']
                     labels = tensor_set['y']
                     gating_data = tensor_set['gating_data']
-                    spatial_load = compute_spatial_load(accelerator, model, loader, gating_data)
+                    spatial_load = compute_spatial_load(accelerator, model, loader, gating_data, tc)
                     for j in range(images.size(0)):
                         for mode in ['image_only', 'mask', 'separate']:
                             # for mode in ['image_only', 'mask']:
