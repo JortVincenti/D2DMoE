@@ -473,7 +473,7 @@ def setup_state(tc):
 
 def final_eval(args, tc):
     """Use the eval_ep method from VARTrainer for final evaluation."""
-    L_mean, L_tail, acc_mean, acc_tail, tot, duration = tc.trainer.eval_ep(tc.val_loader)
+    L_mean, L_tail, acc_mean, acc_tail, tot, duration, model_costs, model_params = tc.trainer.eval_ep(tc.val_loader)
     print(f"Final evaluation completed: \n"
           f"Mean Loss: {L_mean:.4f}, Tail Loss: {L_tail:.4f}\n"
           f"Mean Accuracy: {acc_mean:.2f}%, Tail Accuracy: {acc_tail:.2f}%\n"
@@ -483,19 +483,18 @@ def final_eval(args, tc):
     final_results['args'] = args
     unwrapped_model = tc.accelerator.unwrap_model(tc.model)
     final_results['model_state'] = unwrapped_model.state_dict()
-    tc.writer.add_scalar('Eval/Test loss', L_mean, global_step=tc.state.current_batch)
-    tc.writer.add_scalar('Eval/Test accuracy', acc_mean, global_step=tc.state.current_batch)
+    tc.writer.add_scalar('Eval/Test loss', L_mean)
+    tc.writer.add_scalar('Eval/Test accuracy', acc_mean)
     final_results['final_score'] = acc_mean
     final_results['final_loss'] = L_mean
     logging.info(f'Test accuracy: {acc_mean}')
-    # benchmark model efficiency
-    model_costs, model_params = benchmark(unwrapped_model, tc.test_loader)
-    final_results['model_flops'] = None #model_costs.total()
-    final_results['model_flops_by_module'] = None #dict(model_costs.by_module())
-    final_results['model_flops_by_operator'] = None #dict(model_costs.by_operator())
+
+    final_results['model_flops'] = model_costs.total()
+    final_results['model_flops_by_module'] = dict(model_costs.by_module())
+    final_results['model_flops_by_operator'] = dict(model_costs.by_operator())
     final_results['model_params'] = dict(model_params)
-    #tc.writer.add_scalar('Eval/Model FLOPs', model_costs.total(), global_step=tc.state.current_batch)
-    tc.writer.add_scalar('Eval/Model Params', model_params[''], global_step=tc.state.current_batch)
+    tc.writer.add_scalar('Eval/Model FLOPs', model_costs.total())
+    tc.writer.add_scalar('Eval/Model Params', model_params[''])
     save_final(args, tc.final_path, final_results)
 
 def make_vae(args, tc):

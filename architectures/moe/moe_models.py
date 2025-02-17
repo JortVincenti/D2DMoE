@@ -77,22 +77,42 @@ def moe_vit_block_forward(self, input: torch.Tensor):
         y = self.mlp(y)
     return x + y, gating_data
 
-def moe_var_block_forward(self, x, cond_BD, attn_bias):   # C: embed_dim, D: cond_dim
+def moe_var_block_forward(self, x, cond_BD, attn_bias):  # C: embed_dim, D: cond_dim
     gating_data = {}
     if self.shared_aln:
-        gamma1, gamma2, scale1, scale2, shift1, shift2 = (self.ada_gss + cond_BD).unbind(2) # 116C + B16C =unbind(2)=> 6 B1C
+        gamma1, gamma2, scale1, scale2, shift1, shift2 = (
+            self.ada_gss + cond_BD
+        ).unbind(2)  # shape =>  (B,1,6,C)
     else:
-        gamma1, gamma2, scale1, scale2, shift1, shift2 = self.ada_lin(cond_BD).view(-1, 1, 6, self.C).unbind(2)
-    x = x + self.drop_path(self.attn( self.ln_wo_grad(x).mul(scale1.add(1)).add_(shift1), attn_bias=attn_bias ).mul_(gamma1))
-    
+        # shape => (B,1,6,C), then we unbind along dimension=2 => 6 Tensors each of shape (B,1,C)
+        gamma1, gamma2, scale1, scale2, shift1, shift2 = self.ada_lin(cond_BD).view(
+            -1, 1, 6, self.C
+        ).unbind(2)
+
+    # 1) Prepare input for attention (no in-place).
+    #    ln_wo_grad(x) => shape same as x, then multiply & add shift out-of-place
+    attn_input = self.ln_wo_grad(x) * (scale1 + 1) + shift1
+    # 2) Forward pass through attn
+    attn_out = self.attn(attn_input, attn_bias=attn_bias)
+    # 3) Multiply by gamma1 out-of-place
+    attn_out = attn_out * gamma1
+    # 4) Residual connection out-of-place
+    x = x + self.drop_path(attn_out)
+
     if isinstance(self.ffn, MoELayer):
-        #x, ffn_gating_data = self.ffn(x)
-        y , ffn_gating_data = self.ffn(self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2))
-        x = x + self.drop_path(y.mul(gamma2))
+        # 5) Prepare input for MoE (no in-place).
+        ffn_input = self.ln_wo_grad(x) * (scale2 + 1) + shift2
+        # 6) Forward pass through MoE
+        y, ffn_gating_data = self.ffn(ffn_input)
+        # 7) Multiply by gamma2 and residual connection
+        x = x + self.drop_path(y * gamma2)
         gating_data.update(ffn_gating_data)
-    else:  
-        x = x + self.drop_path(self.ffn( self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2) ).mul(gamma2)) # this mul(gamma2) cannot be in-placed when FusedMLP is used
-    
+    else:
+        # 5) Prepare input for normal FFN (no in-place).
+        ffn_input = self.ln_wo_grad(x) * (scale2 + 1) + shift2
+        # 6) Multiply by gamma2 out-of-place, then residual
+        x = x + self.drop_path(self.ffn(ffn_input) * gamma2)
+
     return x, gating_data
 
 
@@ -196,7 +216,7 @@ def moe_var_main_forward(
     # -------------------------------------------------------------------------
     # 3) Conditionally drop class indices & build the "sos" embedding
     # -------------------------------------------------------------------------
-    with torch.cuda.amp.autocast(enabled=False):
+    with torch.amp.autocast(device_type='cuda', enabled=False):
         # If class_idx is provided, do the cond_drop
         if class_idx is not None:
             class_idx = torch.where(
@@ -454,4 +474,9 @@ def ffn_filter_condition_bert(_model: nn.Module, m: nn.Module):
 
 def ffn_filter_condition_gemma(_model: nn.Module, m: nn.Module):
     if isinstance(m, GemmaMLP):
+        return True
+
+
+def ffn_filter_condition_var(_model: nn.Module, m: nn.Module):
+    if isinstance(m, AdaLNSelfAttn):
         return True

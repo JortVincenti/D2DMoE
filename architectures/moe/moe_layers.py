@@ -96,25 +96,7 @@ class ExecuteAllExperts(ExpertsLayer):
             return x
         else:
             for i, layer in enumerate(self.layers):
-                # if hasattr(layer, "w"):
-                #     print("Layer {} ({}): Weight stats -> min: {:.4f}, max: {:.4f}, mean: {:.4f}, std: {:.4f}".format(
-                #         i, layer.__class__.__name__,
-                #         layer.w.data.min().item(),
-                #         layer.w.data.max().item(),
-                #         layer.w.data.mean().item(),
-                #         layer.w.data.std().item()))
-                #     if hasattr(layer, "b") and layer.bias is not None:
-                #         print("Layer {} ({}): Bias stats -> min: {:.4f}, max: {:.4f}, mean: {:.4f}, std: {:.4f}".format(
-                #             i, layer.__class__.__name__,
-                #             layer.b.data.min().item(),
-                #             layer.b.data.max().item(),
-                #             layer.b.data.mean().item(),
-                #             layer.b.data.std().item()))
                 x = layer(x)
-                # Print the output statistics after each layer:
-                # print("After layer {} ({}): mean {:.4f}, std {:.4f}".format(
-                #     i, layer.__class__.__name__, x.mean().item(), x.std().item()))
-                
             x = torch.einsum('end,ne->nd', x, routing_tensor)
             return x
 

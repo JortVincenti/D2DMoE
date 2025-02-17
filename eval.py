@@ -1,7 +1,7 @@
 import logging
 import time
 from collections import defaultdict
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional, Union
 
 import torch
 from accelerate import Accelerator
@@ -14,10 +14,12 @@ from architectures.early_exits.pbee import PBEE
 from architectures.vit import MLP as CustomMLP
 from architectures import VAR
 from utils import flop_count, get_module_by_name, remove_hooks, find_module_names, add_save_activations_hook
+from architectures.helpers import gumbel_softmax_with_rng, sample_with_top_k_top_p_
 #import utils
+import numpy as np
 import dist
 
-from trainer import VARTrainer
+#from trainer import VARTrainer
 
 
 def test_classification(accelerator: Accelerator,
@@ -271,22 +273,6 @@ def average_earlyexiting_flops(head_costs: List, head_exit_counts: torch.Tensor)
     return average_cost
 
 
-# def average_moe_flops(cost_without_experts, token_expert_costs, gating_data):
-#     assert len(token_expert_costs) == gating_data.size(1), f'{len(token_expert_costs)=}\n{len(gating_data)=}'
-#     total_average_flops = cost_without_experts
-#     expert_average_costs = {}
-#     for moe_name, token_expert_cost in token_expert_costs.items():
-#         g_x = gating_data[moe_name]
-#         # g_x should have a (batch_size, sequence_length, expert_num)
-#         assert g_x.dim() == 3
-#         expert_average_cost = (g_x > 0.0).long().sum().item() * token_expert_cost / g_x.size(0)
-#         expert_average_costs.append(expert_average_cost)
-#         logging.info(f'Averaged FLOPs for MoE {moe_name}: {expert_average_cost}')
-#         total_average_flops += expert_average_cost
-#     return total_average_flops, expert_average_costs
-
-
-
 def average_avit_flops(constant_cost, mha_sequence_costs, mlp_token_cost, token_counts):
     mha_sequence_costs = torch.tensor(mha_sequence_costs, dtype=torch.long)
     # token counts contains the number of layers (i.e. entire blocks)
@@ -495,26 +481,23 @@ def benchmark_with_sample(model: torch.nn.Module,
     with torch.inference_mode():
         model_costs = flop_count(model, (sample))
         param_count = parameter_count(model)
-    # logging.info(f'Ops by operator:\n{model_costs.by_operator()}')
-    # logging.info(f'Ops by module:\n{flop_count_table(model_costs, max_depth=7)}')
-    # logging.info(f'Total ops: {model_costs.total()}')
-    # unsupported = model_costs.unsupported_ops()
-    # if len(unsupported) > 0:
-    #     for k, v in unsupported.items():
-    #         logging.warning(f'Unsupported op: {k} (occurrences: {v})')
-    # uncalled = model_costs.uncalled_modules()
-    # if len(uncalled) > 0:
-    #     for m in uncalled:
-    #         logging.warning(f'Uncalled module: {m}')
+    logging.info(f'Ops by operator:\n{model_costs.by_operator()}')
+    #logging.info(f'Ops by module:\n{flop_count_table(model_costs, max_depth=7)}') # Jort to Add again right now this is long
+    logging.info(f'Total ops: {model_costs.total()}')
+    unsupported = model_costs.unsupported_ops()
+    if len(unsupported) > 0:
+        logging.warning("Unsupported ops: " + ", ".join(f"{k} (occurrences: {v})" for k, v in unsupported.items()))
+
+    uncalled = model_costs.uncalled_modules()
+    if len(uncalled) > 0:
+        logging.warning(f'Uncalled modules: {", ".join(str(m) for m in uncalled)}')
     return model_costs, param_count
 
 
 def benchmark(model: torch.nn.Module,
               data_loader: torch.utils.data.DataLoader, tc) -> Tuple[FlopCountAnalysis, Dict]:
     X, y = next(iter(data_loader))
-    X = X[:1]
-    y = y[:1]
-
+    
     with torch.no_grad():
         B, V = y.shape[0], tc.model_vae.vocab_size
         X = X.to(dist.get_device(), non_blocking=True)
@@ -525,6 +508,9 @@ def benchmark(model: torch.nn.Module,
     sample = (label_B, x_BLCv_wo_first_l)
 
     return benchmark_with_sample(model, sample)
+
+
+
 
 
 def benchmark_earlyexiting(model: torch.nn.Module,
@@ -558,82 +544,641 @@ def benchmark_earlyexiting(model: torch.nn.Module,
             logging.warning(f'Uncalled module: {m}')
     return head_costs, param_count
 
+import torch
+from typing import Tuple, List
+import matplotlib.pyplot as plt
+
+
+def score_moe(model: torch.nn.Module,
+              data_loader: torch.utils.data.DataLoader,
+              tc, tau: float) -> Tuple[float, float, float, float, float]:
+    """
+    Evaluate the MoE model using TAU-based filtering and visualize predictions.
+    
+    This function computes:
+      - `L_mean`: Mean loss over all tokens.
+      - `L_tail`: Mean loss over only the final `tc.trainer.last_l` tokens.
+      - `acc_mean`: Token-level accuracy over the entire sequence.
+      - `acc_tail`: Token-level accuracy over the last `tc.trainer.last_l` tokens.
+      - `average_experts_per_token`: The number of experts used per token on average.
+    
+    Additionally, it visualizes **the last batch of predictions vs. ground truth** images.
+    """
+    model.eval()
+    total_L_mean = 0.0
+    total_L_tail = 0.0
+    total_acc_mean = 0.0
+    total_acc_tail = 0.0
+    total_experts_selected = 0.0
+    total_tokens = 0
+    total_samples = 0
+
+    device = next(model.parameters()).device
+
+    # Identify MoE modules
+    moe_modules = [m for m in model.modules() if hasattr(m, 'gate') and hasattr(m, 'router')]
+    if not moe_modules:
+        raise ValueError("No MoE modules (with gate and router) were found in the model.")
+
+    # Save original gate functions
+    original_gates = {m: m.gate for m in moe_modules}
+
+    # Define a custom gate function for the first pass that captures the input.
+    def capturing_gate(x_in, m):
+        # Store the tokenized input (the representation fed into the MoE module)
+        m.last_router_input = x_in
+        # Return a tensor of ones to force using all experts.
+        return torch.ones(x_in.size(0), x_in.size(1), m.num_experts,
+                          device=x_in.device, dtype=x_in.dtype)
+
+    total_batches = 3  # Limit to 5 batches for evaluation
+    last_inp_B3HW = None
+    last_logits_BLV = None
+
+    with torch.no_grad():
+        for batch in data_loader:
+            if total_batches == 0:
+                break
+            total_batches -= 1
+
+            inp_B3HW, label_B = batch
+            B = inp_B3HW.size(0)
+
+            # Convert images to token sequences
+            inp_B3HW = inp_B3HW.to(device, non_blocking=True)
+            label_B  = label_B.to(device, non_blocking=True)
+
+            gt_idx_Bl: List[torch.Tensor] = tc.model_vae.img_to_idxBl(inp_B3HW)
+            gt_BL = torch.cat(gt_idx_Bl, dim=1).to(device)  # Shape: (B, L)
+            x_BLCv_wo_first_l: torch.Tensor = tc.model_vae.quantize.idxBl_to_var_input(gt_idx_Bl)
+            L = gt_BL.shape[1]  # Sequence length
+            V = tc.model_vae.vocab_size  # Vocabulary size
+
+            # --- First Pass: Capture the token representation while forcing all experts ---
+            for moe in moe_modules:
+                moe.gate = lambda x_in, m=moe: capturing_gate(x_in, m)
+            
+            model(label_B, x_BLCv_wo_first_l)  # Captures `last_router_input` in each MoE module.
+
+            # --- Build TAU-based Masks for Each MoE Module ---
+            for moe in moe_modules:
+                if not hasattr(moe, "last_router_input"):
+                    raise ValueError("MoE module did not capture router input in the first pass.")
+                router_input = moe.last_router_input  # Expected shape: (B, T, D)
+                
+                # Check input dimension matches router's expected input.
+                expected_dim = moe.router.layers[0].in_features
+                if router_input.size(-1) != expected_dim:
+                    if hasattr(moe, "router_proj"):
+                        router_input = moe.router_proj(router_input)
+                    else:
+                        raise ValueError(
+                            f"Router input dimension mismatch: got {router_input.size(-1)}, expected {expected_dim}."
+                        )
+
+                # Compute predicted expert norms and TAU-based mask
+                predicted_expert_norms = moe.router(router_input)  # Shape: (B, T, num_experts)
+                max_norms, _ = predicted_expert_norms.max(dim=-1, keepdim=True)
+                thresholds = max_norms * (1.0 - tau)
+                new_routing = (predicted_expert_norms >= thresholds).float()
+                
+                # ** Save the routing mask on the module for later use **
+                moe.last_routing_mask = new_routing.clone()
+
+                # Override gate to return the TAU-based mask
+                moe.gate = lambda x_in, mask=new_routing: mask
+
+                # Accumulate expert selection statistics.
+                total_experts_selected += new_routing.sum().item()
+                total_tokens += new_routing.size(0) * new_routing.size(1)
+
+            # --- Second Pass: Forward with TAU-filtered Experts ---
+            output = model(label_B, x_BLCv_wo_first_l)  # Shape: (B, L, V)
+
+            # Store last batch for visualization
+            last_inp_B3HW = inp_B3HW
+            last_logits_BLV = output
+
+            # Track the number of experts selected per token
+            experts_per_token_list = []
+
+            for moe in moe_modules:
+                if hasattr(moe, "last_routing_mask"):
+                    experts_per_token = moe.last_routing_mask.sum(dim=-1)  # Sum over expert dimension
+                    experts_per_token_list.append(experts_per_token)
+
+            # Concatenate all expert counts (if multiple MoE layers exist)
+            if experts_per_token_list:
+                experts_per_token_tensor = torch.cat(experts_per_token_list, dim=-1)  # Shape: (B, L)
+                avg_experts_per_token = experts_per_token_tensor.float().mean().item()
+                min_experts_per_token = experts_per_token_tensor.float().min().item()
+                max_experts_per_token = experts_per_token_tensor.float().max().item()
+            else:
+                avg_experts_per_token = float('nan')
+                min_experts_per_token = float('nan')
+                max_experts_per_token = float('nan')
+
+            # Compute losses and accuracies
+            L_mean = tc.trainer.val_loss(output.data.view(-1, V), gt_BL.view(-1)) * B
+            L_tail = tc.trainer.val_loss(
+                output.data[:, -tc.trainer.last_l:].reshape(-1, V),
+                gt_BL[:, -tc.trainer.last_l:].reshape(-1)
+            ) * B
+
+            acc_mean = (output.data.argmax(dim=-1) == gt_BL).sum() * (100.0 / L)
+            acc_tail = (output.data[:, -tc.trainer.last_l:].argmax(dim=-1)
+                        == gt_BL[:, -tc.trainer.last_l:]).sum() * (100.0 / tc.trainer.last_l)
+
+            # Print statistics for debugging
+            print(f"Avg Experts Per Token: {avg_experts_per_token:.2f}, "
+                f"Min: {min_experts_per_token}, Max: {max_experts_per_token}")
+            # Accumulate statistics
+            total_L_mean += L_mean
+            total_L_tail += L_tail
+            total_acc_mean += acc_mean
+            total_acc_tail += acc_tail
+            total_samples += B
+
+            # Restore original gate functions
+            for moe in moe_modules:
+                moe.gate = original_gates[moe]
+
+
+    # --- Visualization of Multi-Scale Predictions ---
+    if last_inp_B3HW is not None and last_logits_BLV is not None:
+        pred_BL = last_logits_BLV.argmax(dim=-1)
+
+        v_patch_nums = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
+        split_sizes = [pn * pn for pn in v_patch_nums]
+        scales_tokens = torch.split(pred_BL, split_sizes, dim=1)
+
+        # Get reconstructed images for each scale
+        pred_img_B3HW_list = tc.model_vae.idxBl_to_img(
+            ms_idx_Bl=scales_tokens,  
+            same_shape=False,  
+            last_one=False    
+        )
+
+        # Ensure idxBl_to_img returned a list of images
+        if not isinstance(pred_img_B3HW_list, list):
+            pred_img_B3HW_list = [pred_img_B3HW_list]
+
+        # Get experts per token information
+        experts_per_token_list = []
+        for moe in moe_modules:
+            if hasattr(moe, "last_routing_mask"):
+                experts_per_token = moe.last_routing_mask.sum(dim=-1)  # Sum over experts
+                experts_per_token_list.append(experts_per_token)
+
+        if experts_per_token_list:
+            experts_per_token_tensor = torch.cat(experts_per_token_list, dim=-1)  # Shape: (B, L)
+        else:
+            experts_per_token_tensor = None  # No expert information available
+
+        # Convert first sample to numpy for visualization
+        batch_idx = 0  # Pick the first sample
+        true_img_3HW = last_inp_B3HW[batch_idx].detach().cpu()
+        true_img_np = true_img_3HW.permute(1,2,0).numpy().clip(0,1)
+
+        num_scales = len(pred_img_B3HW_list)
+        fig, axes = plt.subplots(2, num_scales + 1, figsize=((num_scales + 1) * 3, 6))  # +1 for true image
+
+        # Plot all predicted scales in the top row
+        for i, pred_img_3HW in enumerate(pred_img_B3HW_list):
+            pred_img_np = pred_img_3HW[batch_idx].detach().cpu().permute(1,2,0).numpy().clip(0,1)
+            
+            axes[0, i].imshow(pred_img_np)
+            axes[0, i].set_title(f"{v_patch_nums[i]*16}x{v_patch_nums[i]*16}")  # Scale size
+            axes[0, i].axis("off")
+
+        # Add the **ground truth** final image at the end
+        axes[0, num_scales].imshow(true_img_np)
+        axes[0, num_scales].set_title("Ground Truth (Final)")
+        axes[0, num_scales].axis("off")
+
+        # Plot expert usage per token below each predicted image
+        if experts_per_token_tensor is not None:
+            experts_per_token_np = experts_per_token_tensor[batch_idx].detach().cpu().numpy()
+
+            for i in range(num_scales):
+                token_counts = experts_per_token_np[:split_sizes[i]].reshape(v_patch_nums[i], v_patch_nums[i])
+                axes[1, i].imshow(token_counts, cmap="viridis", aspect="auto")
+                axes[1, i].set_title("Experts Used")
+                axes[1, i].axis("off")
+                for (m, n), val in np.ndenumerate(token_counts):
+                    axes[1, i].text(n, m, int(val), ha='center', va='center', color='white')
+
+        # Add a blank spot below the **ground truth** image (since it has no expert data)
+        axes[1, num_scales].axis("off")
+
+        # Save the visualization
+        plt.tight_layout()
+        plt.savefig(f"plots_with_tau/multi_scale_experts_{tau}.png")
+        plt.close(fig)
+
+
+    return total_L_mean, total_L_tail, total_acc_mean, total_acc_tail, total_experts_selected / total_tokens
+
+def capturing_gate_for_moe(moe, x_in):
+    """Return a gate function that sets moe.last_router_input and returns an all-ones routing tensor."""
+    def _capturing_gate(x):
+        moe.last_router_input = x
+        return torch.ones(
+            x.size(0), x.size(1), moe.num_experts,
+            dtype=x.dtype, device=x.device
+        )
+    return _capturing_gate
+
+
+# 1) Force all experts and hook only the final sub-layer of each expert.
+# Correct
+def attach_final_expert_hooks(moe_modules, x_in):
+    def expert_output_hook(module, input, output):
+        # Save the output of this expert's final sub-layer
+        module.last_expert_output = output
+
+    for moe in moe_modules:
+        # Overwrite the gate with a function that returns all ones
+        moe.gate = capturing_gate_for_moe(moe, x_in)
+        
+        # Attach the forward hook only to the final sub-layer
+        final_sub_layer = moe.experts.layers[-1]
+        final_sub_layer.register_forward_hook(expert_output_hook)
+
+
+def compute_tau_routing(moe, tau, x_shape, x):
+    """Compute the L2 norm of each expert's final output and build a binary TAU-based mask."""
+    
+    expert_outputs = moe.experts.layers[-1].last_expert_output
+
+
+    # Now compute the L2 norms:
+    # shape: (num_experts, B*T) or (e, n)
+    norms = torch.linalg.vector_norm(expert_outputs, ord=2, dim=-1)
+
+    # Suppose B = input.size(0), T = input.size(1)
+    e = norms.size(0)
+    B = x_shape[0]
+    T = x_shape[1]
+
+    max_norms = norms.view(e, B, T).permute(1, 2, 0)  # => shape (B, T, e)
+    
+    max_norms, _ = norms.max(dim=-1, keepdim=True)
+    norm_thresholds = max_norms * (1.0 - tau)
+    
+    new_routing = torch.zeros_like(norms)
+    new_routing[norms >= norm_thresholds] = 1.0
+    new_routing = new_routing.transpose(0, 1) 
+    
+    # Save the mask and override gate:
+    moe.last_routing_mask = new_routing.clone()
+    moe.gate = lambda x_in, mask=new_routing: mask
+    
+    usage_per_token = new_routing.sum(dim=-1)  # shape (B, T)
+    moe.last_expert_usage = usage_per_token.clone()
+    
+
+
+def run_inference_with_tau(tc, x, moe_modules, cond_BD_or_gss, tau, checkperscalelist):
+    """Helper to run the second pass with the TAU-based gating."""
+    # Now that we've built new_routing, run the second pass:
+    for index, b in enumerate(tc.model.blocks):
+        compute_tau_routing(moe_modules[index], tau, x.shape, x)
+        #print(moe_modules[index].last_routing_mask)
+        # check all values are one 
+        #assert moe_modules[index].last_routing_mask.all(), "All values should be one"
+        out = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
+        x = out[0] if isinstance(out, tuple) else out
+        # if not torch.allclose(x, checkperscalelist[index], rtol=1e-5, atol=1e-6):
+        #     diff = x - checkperscalelist[index]
+        #     abs_diff = diff.abs()
+        #     mismatch_mask = abs_diff > 1e-7  # or your chosen threshold
+            
+        #     num_mismatch = mismatch_mask.sum().item()
+        #     total_elems = x.numel()
+            
+        #     # Print stats
+        #     print(f"[DEBUG] Tensors differ: {num_mismatch} elements out of {total_elems}")
+        #     if num_mismatch > 0:
+        #         sum_diff = abs_diff[mismatch_mask].sum().item()
+        #         max_diff = abs_diff[mismatch_mask].max().item()
+        #         print(f"[DEBUG] sum of differences in mismatched elements: {sum_diff}")
+        #         print(f"[DEBUG] max difference in mismatched elements: {max_diff}")
+        #         print(f"[DEBUG] some mismatch values: {abs_diff[mismatch_mask][:10]}")
+    return x
+
+
+@torch.no_grad()
+def autoregressive_infer_cfg_with_expert_plot(
+    tc, 
+    g_seed: Optional[int] = None, 
+    cfg: float = 1.5, 
+    top_k: int = 0, 
+    top_p: float = 0.0,
+    more_smooth: bool = False,
+    tau: float = 1.0,
+) -> torch.Tensor:
+    """
+    Autoregressive inference with CFG and two-pass TAU-based expert selection,
+    with extensive debug prints for intermediate tensor shapes and values.
+
+    This function performs an iterative, scale-wise generation. For each scale:
+      1. FIRST PASS: Force all experts to run by overriding each MoE module’s gate with a capturing function.
+         This saves the tokenized input in m.last_router_input.
+      2. TAU-BASED Mask Computation: Using the captured input, run the first expert layer from each MoE module
+         to compute L2 norms and then threshold them to form a binary mask (new_routing).
+         The mask is saved in m.last_routing_mask and the module’s gate is overridden to return it.
+      3. SECOND PASS: Re-run the blocks with the TAU-filtered experts to get logits, apply CFG (if applicable),
+         and sample tokens.
+      4. Update latent representation using these sampled tokens.
+      5. Finally, decode the tokens to images and produce a visualization:
+         Top row: predicted images at each scale plus the final (ground truth) image.
+         Bottom row: corresponding expert usage heatmaps.
+    """
+    # Set RNG if provided. Correct
+    if g_seed is not None:
+        tc.model.rng.manual_seed(g_seed)
+        rng = tc.model.rng
+    else:
+        rng = None
+
+    # Get one batch from the validation loader. Correct
+    inp_B3HW, label_B = next(iter(tc.val_loader))
+    # For debugging: use only the first sample in the batch. Correct
+    inp_B3HW, label_B = inp_B3HW[:1], label_B[:1]
+    B = label_B.size(0)
+    #print(f"[DEBUG] Batch size B: {B}") # Correct
+
+    # Prepare conditioning tokens and positional embeddings.
+    cond_BD = sos = tc.model.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=tc.model.num_classes)), dim=0))
+    lvl_pos = tc.model.lvl_embed(tc.model.lvl_1L) + tc.model.pos_1LC
+    next_token_map = sos.unsqueeze(1).expand(2 * B, tc.model.first_l, -1) \
+                     + tc.model.pos_start.expand(2 * B, tc.model.first_l, -1) \
+                     + lvl_pos[:, :tc.model.first_l]
+    #print(f"[DEBUG] sos shape: {sos.shape}, next_token_map shape: {next_token_map.shape}")
+
+    # Initialize latent representation.
+    f_hat = sos.new_zeros(B, tc.model.Cvae, tc.model.patch_nums[-1], tc.model.patch_nums[-1])
+    #print(f"[DEBUG] f_hat shape: {f_hat.shape}")
+
+    # Until here is correct
+    for b in tc.model.blocks:
+        b.attn.kv_caching(True)
+
+    # Get all MoE modules within the blocks.
+    moe_modules = [m for b in tc.model.blocks for m in b.modules() if hasattr(m, 'gate') and hasattr(m, 'router')]
+    #print(f"[DEBUG] Found {len(moe_modules)} MoE modules.")
+    original_gates = {m: m.gate for m in moe_modules}
+
+    # Prepare lists to store tokens and expert usage per scale.
+    scale_tokens_list = []        # Will store sampled tokens per scale.
+    scale_expert_usage_list = []    # Will store expert usage per scale (averaged over batch).
+    cur_L = 0
+    num_scales = len(tc.model.patch_nums)
+    my_cache = []
+    # Iterate over scales.
+    for si, pn in enumerate(tc.model.patch_nums):
+        ratio = si / tc.model.num_stages_minus_1
+        cur_L += pn * pn
+
+        # Compute conditioning for this scale.
+        cond_BD_or_gss = tc.model.shared_ada_lin(cond_BD)
+        x = next_token_map  # Autoregressive token input.
+        x_test = x.clone()  # Copy for visualization.
+        x_copy = x.clone()  # Copy for visualization.
+        # 1) Set up hooks only on the final sub-layer of each expert
+        attach_final_expert_hooks(moe_modules, x)
+        checkperscalelist = []
+
+        # 2) First pass: force all experts, gather outputs
+        for b in tc.model.blocks:
+            out = b(x=x_copy, cond_BD=cond_BD_or_gss, attn_bias=None)
+            x_copy = out[0] if isinstance(out, tuple) else out
+            checkperscalelist.append(x_copy.clone())
+    
+        if len(my_cache) == 0:
+            for b in tc.model.blocks:
+                b.attn.cached_k = None
+                b.attn.cached_v = None
+
+        for b, entry in zip(tc.model.blocks, my_cache):
+            b.attn.cached_k = entry["cached_k"]
+            b.attn.cached_v = entry["cached_v"]
+
+        # Assert that x is still the same
+        assert torch.allclose(x, x_test), "x and x_copy should be the same after the first pass."
+        # 4) Second pass: run with new gating
+        
+        x = run_inference_with_tau(tc, x, moe_modules, cond_BD_or_gss, tau, checkperscalelist)
+
+        my_cache = []
+        for b in tc.model.blocks:
+            # If the attention’s caching is enabled
+            # and we have some cached_k, cached_v:
+            cache_entry = {
+                "cached_k": b.attn.cached_k.clone() if b.attn.cached_k is not None else None,
+                "cached_v": b.attn.cached_v.clone() if b.attn.cached_v is not None else None,
+            }
+            my_cache.append(cache_entry)
+
+        
+        # Correct
+        last_moe = moe_modules[8]
+        if hasattr(last_moe, 'last_expert_usage'):
+            # shape (B, T). If B=1, then shape is (1, T). 
+            usage_map = last_moe.last_expert_usage
+            scale_expert_usage_list.append(usage_map.clone())
+        else:
+            scale_expert_usage_list.append(None)
+        
+        logits_BlV = tc.model.get_logits(x, cond_BD)
+
+        #print(f"[DEBUG] logits_BlV shape before CFG adjustment: {logits_BlV[0]}")
+
+        # print(f"[DEBUG] logits_BlV shape before CFG adjustment: {logits_BlV.shape}")
+        t = cfg * ratio
+        logits_BlV = (1 + t) * logits_BlV[:B] - t * logits_BlV[B:]
+        #print(f"[DEBUG] logits_BlV shape after CFG adjustment: {logits_BlV[0]}")
+        idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0] # same output
+        # print(f"[DEBUG] idx_Bl shape: {idx_Bl.shape}, sample tokens: {idx_Bl}")
+        #print(f"[DEBUG] idx_Bl shape: {idx_Bl.shape}, sample tokens: {idx_Bl[0]}")
+       
+        # --- Update latent representation ---
+        h_BChw = tc.model_vae.quantize.embedding(idx_Bl)
+        #print(f"[DEBUG] h_BChw shape: {h_BChw[0]}") 
+        h_BChw = h_BChw.transpose_(1, 2).reshape(B, tc.model.Cvae, pn, pn)
+        #print(f"[DEBUG] h_BChw shape: {h_BChw[0]}")
+
+        
+        f_hat, next_token_map = tc.model_vae.quantize.get_next_autoregressive_input(si, num_scales, f_hat, h_BChw) #tc.model.vae_quant_proxy[0].get_next_autoregressive_input(si, num_scales, f_hat, h_BChw)
+        # print('sample f_hat:', f_hat[0, 0, 0], f_hat[0, 0, 1], f_hat[0, 0, 2])
+        # print('sample next token:', next_token_map[0], next_token_map[0], next_token_map[0])
+        # print(f"[DEBUG] After latent update, f_hat shape: {f_hat.shape}, next_token_map shape: {next_token_map.shape}")
+        scale_tokens_list.append(f_hat.clone())
+
+        if si != tc.model.num_stages_minus_1:
+            next_token_map = next_token_map.view(B, tc.model.Cvae, -1).transpose(1, 2)
+            #print('sample next token:', next_token_map[0], next_token_map[0], next_token_map[0])
+            # print(f"[DEBUG] next_token_map after view and transpose: {next_token_map.shape}")
+            next_token_map = tc.model.word_embed(next_token_map) + lvl_pos[:, cur_L:cur_L + tc.model.patch_nums[si + 1] ** 2]
+            #print('sample next token:', next_token_map[0], next_token_map[0], next_token_map[0])
+            # print(f"[DEBUG] next_token_map after word_embed and addition: {next_token_map.shape}")        
+            next_token_map = next_token_map.repeat(2, 1, 1)
+            #print('sample next token:', next_token_map[0], next_token_map[0], next_token_map[0])
+            # print(f"[DEBUG] Final next_token_map shape: {next_token_map.shape}")
+
+
+    # --- Visualization ---
+    num_scales = len(scale_tokens_list)
+    fig, axes = plt.subplots(2, num_scales + 1, figsize=((num_scales + 1) * 3, 6))
+    batch_idx = 0  # Visualize the first sample.
+
+    # Top row: predicted images at each scale.
+    for i, latent in enumerate(scale_tokens_list):
+        # latent should have shape (B, Cvae, H, W) with B=1.
+        final_img = tc.model_vae.fhat_to_img(latent) 
+        img = final_img[0].permute(1,2,0).mul(255).clamp(0,255).cpu().numpy().astype(np.uint8)
+        axes[0, i].imshow(img)
+        axes[0, i].set_title(f"Scale {i+1} ({tc.model.patch_nums[i]}x{tc.model.patch_nums[i]})")
+        axes[0, i].axis("off")
+    # Last column: ground truth final image.
+    gt_img = inp_B3HW[0].detach().cpu().permute(1,2,0).numpy().clip(0,1).astype(np.float32)
+    axes[0, num_scales].imshow(gt_img)
+    axes[0, num_scales].set_title("Ground Truth Final")
+    axes[0, num_scales].axis("off")
+
+    # Bottom row: expert usage heatmaps per scale.
+    if scale_expert_usage_list is not None:
+        for i in range(num_scales):
+            if scale_expert_usage_list[i] is not None:
+                pn = tc.model.patch_nums[i]
+                usage = scale_expert_usage_list[i]
+                if usage.numel() >= pn * pn:
+                    usage_img = usage[:pn*pn].reshape(pn, pn)
+                else:
+                    usage_img = usage.reshape(pn, pn)
+                usage_img_np = usage_img.cpu().numpy().astype(np.float32)
+                axes[1, i].imshow(usage_img_np, cmap="viridis", aspect="auto")
+                axes[1, i].set_title("Experts Used")
+                axes[1, i].axis("off")
+                for (m, n), val in np.ndenumerate(usage_img_np):
+                    axes[1, i].text(n, m, int(val), ha='center', va='center', color='white', fontsize=8)
+            else:
+                axes[1, i].axis("off")
+    axes[1, num_scales].axis("off")
+
+    plt.tight_layout()
+    plt.savefig(f"plots_with_tau/multi_scale_experts_{tau}.png")
+    plt.close(fig)
+    print(f"[DEBUG] Visualization saved as plots_with_tau/multi_scale_experts_{tau}.png")
+
+    # Restore original MoE gate functions.
+    for m in moe_modules:
+         m.gate = original_gates[m]
+
+    return final_img
+
+
+
+
+
+
 
 def benchmark_moe(model: torch.nn.Module,
-                  data_loader: torch.utils.data.DataLoader, tc=None):
+                  data_loader: torch.utils.data.DataLoader, tc=None) -> Tuple[float, Dict, Dict]:
     from architectures.moe.moe_layers import MoELayer, ExecuteAllExperts, ModuleBatchedExperts, CustomKernelExperts
     model_costs, model_params = benchmark(model, data_loader, tc)
-    # find MoE modules and order them
+
+    # Find MoE layers
     moe_module_names = find_module_names(model, lambda _, m: isinstance(m, MoELayer))
-    # add hooks on gating networks and expert modules
+
+    # Find expert modules inside each MoE layer
     experts_module_names = {}
     for moe_module_name in moe_module_names:
         moe_module = get_module_by_name(model, moe_module_name)
-        # find the experts module
-        experts_names = find_module_names(moe_module,
-                                          lambda _, m: isinstance(m, (
-                                              ExecuteAllExperts, ModuleBatchedExperts, CustomKernelExperts)))
+        experts_names = find_module_names(moe_module, lambda _, m: isinstance(m, (ExecuteAllExperts, ModuleBatchedExperts, CustomKernelExperts)))
         assert len(experts_names) == 1, f'{len(experts_names)=}'
         experts_module_names[moe_module_name] = f'{moe_module_name}.{experts_names[0]}'
-    # add hooks
-    expert_module_name_list = [v for v in experts_module_names.values()]
-    # expert_to_module_mapping = {v: k for k, v in experts_module_names.items()}
+
+    # Add hooks to capture activations
+    expert_module_name_list = list(experts_module_names.values())
     experts_inputs, _, experts_handles = add_save_activations_hook(model, expert_module_name_list)
-    # push an example though forward
+
+    # Run a forward pass with a single batch
     X, y = next(iter(data_loader))
     if isinstance(X, dict):
         sample = {k: v[:1] for k, v in X.items()}
     else:
         sample = X[:1]
 
-    with torch.no_grad():           
+    with torch.no_grad():
         B, V = y.shape[0], tc.model_vae.vocab_size
         X = X.to(dist.get_device(), non_blocking=True)
         label_B = y.to(dist.get_device(), non_blocking=True)
-        gt_idx_Bl: List[ITen] = tc.model_vae.img_to_idxBl(X) # This does not return None
+        gt_idx_Bl: List[ITen] = tc.model_vae.img_to_idxBl(X)
         x_BLCv_wo_first_l: Ten = tc.model_vae.quantize.idxBl_to_var_input(gt_idx_Bl)
-        
-    
+
+    # Run model inference
     model(label_B, x_BLCv_wo_first_l).detach()
 
-    print("model_costs", model_costs)
-    # push a single sample though each of the modules and calculate its costs
+    # Initialize cost tracking
     cost_without_experts = model_costs.total()
     expert_costs = {}
+    expert_selection_stats = {}
+    experts_per_token_stats = {}
+    total_experts_used = 0
+    total_blocks = len(moe_module_names)
+
+    # Process each MoE layer
     for moe_name in moe_module_names:
         experts_name = experts_module_names[moe_name]
         experts_module = get_module_by_name(model, experts_name)
-        # calculate cost of the gating network
+
+        # Extract routing activations (expert selection probabilities)
+        routing_tensor = experts_inputs[experts_name][1]  # Shape: [num_tokens, num_experts]
+        num_experts = experts_module.num_experts
+  
+        # Compute expert selection distribution
+        expert_counts = routing_tensor.argmax(dim=-1).bincount(minlength=num_experts).float()
+        expert_selection_percentages = (expert_counts / expert_counts.sum()) * 100
+
+        # Compute how many experts are selected per token
+        experts_per_token = (routing_tensor > 0).sum(dim=-1)  # Counts nonzero entries per token
+        avg_experts_per_token = experts_per_token.float().mean().item()
+        total_experts_used += avg_experts_per_token
+
+        # Store the stats for logging
+        expert_selection_stats[moe_name] = expert_selection_percentages.tolist()
+        experts_per_token_stats[moe_name] = avg_experts_per_token
+
+        # Compute gating cost
         gating_cost = model_costs.by_module()[moe_name] - model_costs.by_module()[experts_name]
-        # calculate the cost of a single expert for a single token
+
+        # Compute per-token expert cost
         experts_input = experts_inputs[experts_name]
-        assert experts_input[0].dim() == 2
-        assert experts_input[1].dim() == 2
-        # experts_input[1] is the captured routing tensor
         device, dtype = experts_input[1].device, experts_input[1].dtype
-        sizes = (1, experts_module.num_experts)
-        # create a dummy routing tensor for a single-token input
-        dummy_routing_tensor = torch.zeros(sizes, device=device, dtype=dtype)
-        # execute only a single expert for this input
-        dummy_routing_tensor[0, 0] = 1.0
-        # experts_input[0] is the captured input into the experts layer (which should be a single sequence)
-        # experts_input[0][0] is the first captured token
+        dummy_routing_tensor = torch.zeros((1, num_experts), device=device, dtype=dtype)
+        dummy_routing_tensor[0, 0] = 1.0  # Only one expert is selected for benchmarking
+
         experts_input = (experts_input[0][:1], dummy_routing_tensor)
-        with torch.cuda.amp.autocast(dtype=dtype):
+        with torch.amp.autocast(device_type='cuda', dtype=dtype):
             token_expert_cost = flop_count(experts_module, experts_input).total()
+
         if isinstance(experts_module, (ExecuteAllExperts, CustomKernelExperts)):
-            # in this case all experts for each token in the sequence are executed
-            # so we divide by these the number of experts
-            token_expert_cost /= experts_module.num_experts
-        logging.info(
-            f'MoE {moe_name} single token-expert cost: {token_expert_cost}; '
-            f'sequence length: {experts_inputs[experts_name][0].size(0)}')
+            token_expert_cost /= num_experts  # Normalize for MoE models where all experts run
+
         cost_without_experts -= model_costs.by_module()[moe_name] - gating_cost
         expert_costs[moe_name] = token_expert_cost
-    remove_hooks(experts_handles)
-    logging.info(f'Model cost without experts: {cost_without_experts}')
-    return cost_without_experts, expert_costs, model_params
 
+    remove_hooks(experts_handles)
+
+    # Compute average experts per token across all blocks
+    avg_experts_across_blocks = total_experts_used / total_blocks if total_blocks > 0 else 0
+
+    logging.info(f'Average experts per token across all blocks: {avg_experts_across_blocks:.2f}')
+    logging.info(f'Model cost without experts: {cost_without_experts}')
+
+    return cost_without_experts, expert_costs, model_params
 
 def benchmark_avit(model: torch.nn.Module,
                    data_loader: torch.utils.data.DataLoader):

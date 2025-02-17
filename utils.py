@@ -610,8 +610,10 @@ def load_model(args, exp_name: str, exp_id: str, device: Union[torch.device, str
         run_model_args.append(model_arg)
         exp_name = arg.base_on if hasattr(arg, 'base_on') else None
         exp_id = arg.exp_id
-    
     print('Done with loading states')
+    #print('Run states:', run_states)
+    print('Run args:', run_args)
+    print('Run model args:', run_model_args)
     # create model from the most nested base model
     for arg, model_arg in zip(reversed(run_args), reversed(run_model_args)):
         print(f'Creating model for {arg.model_class} with args: {model_arg}')
@@ -634,6 +636,7 @@ def load_model(args, exp_name: str, exp_id: str, device: Union[torch.device, str
             from architectures.vit import VisionTransformer as CustomVisionTransformer
             from architectures.vit import ffn_filter_condition as ffn_filter_condition_vit
             from torchvision.models import VisionTransformer
+            from architectures.moe.dsti import dsti_mlp_filter_condition 
 
             if isinstance(model, (VisionTransformer, CustomVisionTransformer)):
                 ffn_filter_condition = ffn_filter_condition_vit
@@ -644,7 +647,7 @@ def load_model(args, exp_name: str, exp_id: str, device: Union[torch.device, str
             elif isinstance(model, GemmaWrapper):
                 ffn_filter_condition = ffn_filter_condition_gemma
             elif isinstance(model, NullDDP):
-                ffn_filter_condition = ffn_filter_condition_vit
+                ffn_filter_condition = dsti_mlp_filter_condition
             else:
                 raise NotImplementedError(f'Unknown model type: {type(model)}')
             model, _ = replace_with_moes(model, **model_arg, module_filter_contition=ffn_filter_condition)
@@ -692,11 +695,13 @@ def load_model(args, exp_name: str, exp_id: str, device: Union[torch.device, str
             model_arg = {'base_model': model, **model_arg}
             model = create_model(arg.model_class, model_arg).to(device)
     # state loading is only necessary for the model being loaded
-    state_dict = run_states[0]['model_state']
+    state_dict = run_states[0]['model_state'] # Jort: This is the state dict that is loaded
     print(f'Loading model for {original_exp_name}_{original_exp_id}')
     model.load_state_dict(state_dict)
     logging.info(f'Model for {original_exp_name}_{original_exp_id} loaded successfully')
     return model, run_args[0], run_states[0], var_wo_ddp
+
+
 
 
 def accelerate_launcher(function, num_processes=None, mixed_precision="no", use_port="29500"):

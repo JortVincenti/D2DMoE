@@ -11,7 +11,8 @@ from train import TrainingContext, setup_accelerator, setup_data, setup_optimiza
     setup_state, final_eval, make_vae
 from utils import load_model
 from utils_var import arg_util
-from trainer import VARTrainer    
+from trainer import VARTrainer
+from architectures.pretrained import get_var_d16    
 
 
 class ParamSplitContext(TrainingContext):
@@ -21,10 +22,10 @@ class ParamSplitContext(TrainingContext):
 
 def setup_model(args, tc):
     assert args.model_class == 'dsti_expert_split'
-    base_model, base_args, _, tc.var_wo_ddp = load_model(args, args.base_on, args.exp_id)
+    base_model, _ = get_var_d16() #load_model(args, args.base_on, args.exp_id)
     tc.orig_model = base_model
     tc.model, tc.replaced_modules_list = replace_with_moes(base_model, **args.model_args,
-                                                           module_filter_contition=dsti_mlp_filter_condition)
+                                                        module_filter_contition=dsti_mlp_filter_condition)
     print('done replace_with_moes', tc.replaced_modules_list)
     init_fun = INIT_NAME_MAP[args.init_fun]
     
@@ -35,8 +36,6 @@ def setup_model(args, tc):
 
 def param_split(tc):
     unwrapped_model = tc.accelerator.unwrap_model(tc.model)
-    print('unwrapped_model', unwrapped_model)
-    print('tc.orig_model', tc.orig_model)
     print('tc.replaced_modules_list', tc.replaced_modules_list)
     if tc.state.current_batch == 0:
         split_original_parameters(tc.orig_model, unwrapped_model, tc.replaced_modules_list)
@@ -59,12 +58,12 @@ def train(args):
     setup_accelerator(args, tc)
     setup_files_and_logging(args, tc)
     setup_model(args, tc)
-    print('5')
-    setup_data(args, tc)
-    print('6')
-    setup_optimization(args, tc)
-    print('7')
+    
     setup_state(tc)
+    setup_data(args, tc)
+    setup_optimization(args, tc)
+
+    param_split(tc)
 
     make_vae(args, tc)
     # Build the trainer
@@ -73,18 +72,13 @@ def train(args):
         patch_nums=args.patch_nums, # correct
         resos=args.resos, # correct
         vae_local=tc.model_vae,
-        var_wo_ddp=tc.var_wo_ddp, # correct
+        var_wo_ddp=tc.model, # correct
         var=tc.model, # correct
         var_opt=tc.optimizer, # correct
         label_smooth=args.ls # correct
     )
 
-    print('8')
-    param_split(tc)
-
-    tc.model=tc.model.to('cuda')
-
-    print('9')
+    #tc.model=tc.model.to('cuda')
     final_eval(args, tc)
 
 

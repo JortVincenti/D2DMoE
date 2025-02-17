@@ -9,14 +9,20 @@ from torch import nn
 from architectures.moe.moe_layers import ExecuteAllExperts, CustomKernelExperts
 from architectures.moe.moefication import add_routers, MoeficationMoE
 from common import get_default_args, INIT_NAME_MAP, LOSS_NAME_MAP
-from eval import benchmark_moe, online_evaluate_moe
+from eval import benchmark_moe, online_evaluate_moe, score_moe, autoregressive_infer_cfg_with_expert_plot
 from train import TrainingContext, setup_accelerator, setup_data, setup_optimization, setup_files_and_logging, \
-    setup_state, make_vae, final_eval
+    setup_state, make_vae
 from utils import load_model, save_state, remove_hooks, save_final, Mixup, get_lrs, \
     get_module_name, add_save_inputs_hook, add_save_output_norm_hook
 from utils_var import arg_util
 from trainer import VARTrainer
 import dist
+from architectures.moe.dsti import dsti_mlp_filter_condition
+from architectures.moe.moefication import replace_with_moes
+from architectures.pretrained import get_var_d16  
+from pathlib import Path
+from architectures.moe.dsti import replace_with_relu
+from architectures.moe.dsti import find_gelu_activations
 
 
 class RouterTrainingContext(TrainingContext):
@@ -31,7 +37,37 @@ class RouterTrainingContext(TrainingContext):
 
 def setup_model(args, tc):
     assert args.model_class == 'dsti_router'
-    model, base_args, _, tc.model_var_wo_ddp = load_model(args, args.base_on, args.exp_id)
+
+    # Base class
+    model, _ = get_var_d16()
+
+    # Sparsity
+    if True:	
+        final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_enforce_sparsity_C5DOGOFE_1/final.pth')
+        final_state = torch.load(final_path, map_location=args.device)
+        state_dict = final_state['model_state'] # Jort: This is the state dict that is loaded
+        model_arg = final_state['args'].model_args
+        activations_to_sparsify = find_gelu_activations(model, **model_arg)
+        model = replace_with_relu(model, activations_to_sparsify)
+        model = model.to(args.device)
+        model.load_state_dict(state_dict)
+    
+
+    # Get the MoE model without router.
+    if True:
+        final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_dsti_expert_split_4KAHVWXI_1/final.pth')
+    else:
+        final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_dsti_expert_split_FANB4KGP_1/final.pth')
+
+
+    final_state = torch.load(final_path, map_location=args.device)
+    state_dict = final_state['model_state'] # Jort: This is the state dict that is loaded
+    model_arg = final_state['args'].model_args
+    model, _ = replace_with_moes(model, **model_arg, module_filter_contition=dsti_mlp_filter_condition)
+    model = model.to(args.device)
+
+    
+    model.load_state_dict(state_dict)
     tc.moe_modules = add_routers(model, args.model_args)
     init_fun = INIT_NAME_MAP[args.init_fun]
     if init_fun is not None:
@@ -105,49 +141,49 @@ def set_for_eval_with_topk(tc, k):
             m.k = k
 
 
-def in_training_eval(args, tc):
+def in_training_eval(args, tc, first_time=False):
     if tc.state.current_batch in tc.eval_batch_list:
         if tc.accelerator.is_main_process:
             tc.writer.add_scalar('Train/Progress',
                                  tc.state.current_batch / tc.last_batch,
                                  global_step=tc.state.current_batch)
         unwrapped_model = tc.accelerator.unwrap_model(tc.model)
-        set_for_eval_with_topk(tc, 1)
-        #cost_without_experts, token_expert_costs, model_params = benchmark_moe(unwrapped_model, tc.test_loader)
+        # set_for_eval_with_topk(tc, 1)
+        # cost_without_experts, token_expert_costs, model_params = benchmark_moe(unwrapped_model, tc.test_loader, tc)
         for tau in args.dsti_tau_to_eval:
-            if tc.accelerator.is_main_process:
-                logging.info(f'Testing on testset for tau={tau} on {args.eval_batches} batches.')
-            set_for_eval_with_dynk(tc, tau, args.dsti_expert_selection_mode)
-            # test_loss, test_acc, test_average_flops, _ = online_evaluate_moe(tc.accelerator,
-            #                                                                  tc.model,
-            #                                                                  tc.test_loader,
-            #                                                                  tc.criterion_type,
-            #                                                                  cost_without_experts,
-            #                                                                  token_expert_costs,
-            #                                                                  batches=args.eval_batches)
             # if tc.accelerator.is_main_process:
-            #     logging.info(f'Testing on trainset for tau={tau} on {args.eval_batches} batches.')
-            # train_loss, train_acc, train_average_flops, _ = online_evaluate_moe(tc.accelerator,
-            #                                                                     tc.model,
-            #                                                                     tc.train_loader,
-            #                                                                     tc.criterion_type,
-            #                                                                     cost_without_experts,
-            #                                                                     token_expert_costs,
-            #                                                                     batches=args.eval_batches)
-            # if tc.accelerator.is_main_process:
-            #     tc.writer.add_scalar(f'Eval with tau={tau}/Test loss', test_loss,
-            #                          global_step=tc.state.current_batch)
-            #     tc.writer.add_scalar(f'Eval with tau={tau}/Test accuracy', test_acc,
-            #                          global_step=tc.state.current_batch)
-            #     tc.writer.add_scalar(f'Eval with tau={tau}/Test model FLOPs', test_average_flops,
-            #                          global_step=tc.state.current_batch)
-            #     tc.writer.add_scalar(f'Eval with tau={tau}/Train loss', train_loss,
-            #                          global_step=tc.state.current_batch)
-            #     tc.writer.add_scalar(f'Eval with tau={tau}/Train accuracy', train_acc,
-            #                          global_step=tc.state.current_batch)
-            #     tc.writer.add_scalar(f'Eval with tau={tau}/Train model FLOPs', train_average_flops,
-            #                          global_step=tc.state.current_batch)
+            #     logging.info(f'Testing on testset for tau={tau} on {args.eval_batches} batches.')
+            # set_for_eval_with_dynk(tc, tau, args.dsti_expert_selection_mode)
+            # cost_without_experts, token_expert_costs, model_params = benchmark_moe(unwrapped_model, tc.test_loader, tc)
+            if first_time:
+                #score_moe(unwrapped_model, tc.test_loader, tc, tau)
 
+
+                # set args
+                seed = 0 #@param {type:"number"}
+                torch.manual_seed(seed)
+                num_sampling_steps = 250 #@param {type:"slider", min:0, max:1000, step:1}
+                cfg = 4 #@param {type:"slider", min:1, max:10, step:0.1}
+                class_labels = (980, 980, 437, 437, 22, 22, 562, 562)  #@param {type:"raw"}
+                more_smooth = False # True for more smooth output
+
+
+                # run faster
+                tf32 = True
+                torch.backends.cudnn.allow_tf32 = bool(tf32)
+                torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
+                torch.set_float32_matmul_precision('high' if tf32 else 'highest')
+
+                # sample
+
+                B = len(class_labels)
+                label_B: torch.LongTensor = torch.tensor(class_labels, device='cuda')
+
+                with torch.inference_mode():
+                    with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):    # using bfloat16 can be faster
+                        autoregressive_infer_cfg_with_expert_plot(tc=tc, cfg=cfg, top_k=900, top_p=0.95, g_seed=seed, more_smooth=more_smooth, tau=tau)
+
+        asdadsasd
 
 def training_loop(args, tc):
     if tc.accelerator.is_main_process:
@@ -163,212 +199,299 @@ def training_loop(args, tc):
             label_smoothing=mixup_smoothing, num_classes=unwrapped_model.number_of_classes)
     else:
         mixup_fn = None
-    if args.dsti_separate_router_training: # Jort This is not used
-        org_module_names = list(tc.moe_modules.keys())
+    
 
-        if tc.state.current_batch != 0:
-            raise ValueError('Restarting from non-zero batch is not supported for separate router training.')
-        for module_name in org_module_names:
-            remove_hooks(tc.hook_handles)
-            tc.saved_inputs, input_handles = add_save_inputs_hook(unwrapped_model, [module_name])
-            tc.saved_output_norms, output_handles = add_save_output_norm_hook(unwrapped_model,
-                                                                              [module_name],
-                                                                              ord=args.dsti_router_labels_norm,
-                                                                              dim=-1)
-            tc.hook_handles = input_handles + output_handles
-            tc.state.current_batch = 0
-            while tc.state.current_batch <= tc.last_batch:
-                # save model conditionally
-                if tc.accelerator.is_main_process:
-                    now = datetime.now()
-                    if (now - model_saved).total_seconds() > 60 * args.save_every:
-                        save_state(tc.accelerator, tc.state_path)
-                        model_saved = datetime.now()
-                # model evaluation
-                in_training_eval(args, tc)
-                tc.optimizer.zero_grad(set_to_none=True)
-                set_for_train_iteration(tc)
-                # Account for gradient accumulation
-                running_loss = 0
-                for _ in range(args.gradient_accumulation_steps):
-                    # batch preparation
-                    try:
-                        X, y = next(train_iter)
-                    except StopIteration:
-                        train_iter = iter(tc.train_loader)
-                        X, y = next(train_iter)
-                    if mixup_fn is not None:
-                        X, y = mixup_fn(X, y)
-                    # forward
-                    with torch.no_grad():
-                        _ = tc.model(X)
-                    router_losses = []
-                    for moe_name, moe in tc.moe_modules.items():
-                        router = moe.router
-                        input = tc.saved_inputs[moe_name][0]
-                        captured_output_norm = tc.saved_output_norms[tc.captured_layer_name_map[moe_name]]
-                        with torch.no_grad():
-                            # captured_output_norm size is (num_experts, batch_size * seq_len)
-                            router_label = captured_output_norm.view(captured_output_norm.size(0), input.size(0),
-                                                                     input.size(1))
-                            router_label = router_label.permute(1, 2, 0).detach()
-                        with tc.accelerator.autocast():
-                            router_output = router(input)
-                            router_loss = tc.router_criterion(router_output, router_label)
-                        router_losses.append(router_loss)
-                        if tc.accelerator.is_main_process:
-                            tc.writer.add_scalar(f'Train/Router {moe_name} loss', router_loss.item(),
-                                                 global_step=tc.state.current_batch)
-                    loss = torch.stack(router_losses).mean()
-                    if args.gradient_accumulation_steps > 1:
-                        loss = loss / args.gradient_accumulation_steps
-                    # backward the loss
-                    tc.accelerator.backward(loss)
-                    
-                    running_loss += loss.item()
-                if tc.accelerator.is_main_process:
-                    tc.writer.add_scalar('Train/Average loss', running_loss, global_step=tc.state.current_batch)
-                if args.clip_grad_norm is not None:
-                    total_norm = tc.accelerator.clip_grad_norm_(tc.model.parameters(), args.clip_grad_norm)
-                    if tc.accelerator.is_main_process:
-                        tc.writer.add_scalar('Train/Gradient norm', total_norm.item(),
-                                             global_step=tc.state.current_batch)
-                # gradient step
-                tc.optimizer.step()
+    while tc.state.current_batch <= tc.last_batch:
+        # save model conditionally
+        if tc.accelerator.is_main_process:
+            now = datetime.now()
+            if (now - model_saved).total_seconds() > 60 * args.save_every:
+                save_state(tc.accelerator, tc.state_path)
+                model_saved = datetime.now()
+        # model evaluation
+        in_training_eval(args, tc, first_time=tc.state.current_batch == 0)
+        tc.optimizer.zero_grad(set_to_none=True)
+        set_for_train_iteration(tc) # Set forwardmore to 'all'
+        # Account for gradient accumulation
+        running_loss = 0
+        for _ in range(args.gradient_accumulation_steps):
+            try:
+                X, y = next(train_iter)
+            except StopIteration:
+                train_iter = iter(tc.train_loader)
+                X, y = next(train_iter)
+            if mixup_fn is not None: # Jort: This is not used
+                X, y = mixup_fn(X, y)
+            # forward
+            with torch.no_grad():    
+                B, V = y.shape[0], tc.model_vae.vocab_size
+                X = X.to(dist.get_device(), non_blocking=True)
+                label_B = y.to(dist.get_device(), non_blocking=True)
+                gt_idx_Bl: List[ITen] = tc.model_vae.img_to_idxBl(X) 
+                x_BLCv_wo_first_l: Ten = tc.model_vae.quantize.idxBl_to_var_input(gt_idx_Bl)
+                tc.model(label_B, x_BLCv_wo_first_l)
 
-                if tc.scheduler is not None:
-                    # log LRs
-                    if tc.accelerator.is_main_process:
-                        for i, lr in enumerate(get_lrs(tc.optimizer)):
-                            tc.writer.add_scalar(f'Train/Group {i} LR', lr, global_step=tc.state.current_batch)
-                    if args.scheduler_class == 'reduce_on_plateau':
-                        tc.scheduler.step(loss)
-                    else:
-                        tc.scheduler.step()
-                # bookkeeping
-                tc.state.current_batch += 1
-            tc.hook_handles = []
-    else: 
-        while tc.state.current_batch <= tc.last_batch:
-            # save model conditionally
-            if tc.accelerator.is_main_process:
-                now = datetime.now()
-                if (now - model_saved).total_seconds() > 60 * args.save_every:
-                    save_state(tc.accelerator, tc.state_path)
-                    model_saved = datetime.now()
-            # model evaluation
-            #in_training_eval(args, tc)
-            tc.optimizer.zero_grad(set_to_none=True)
-            set_for_train_iteration(tc)
-            # Account for gradient accumulation
-            running_loss = 0
-            for _ in range(args.gradient_accumulation_steps):
-                try:
-                    X, y = next(train_iter)
-                except StopIteration:
-                    train_iter = iter(tc.train_loader)
-                    X, y = next(train_iter)
-                if mixup_fn is not None: # Jort: This is not used
-                    X, y = mixup_fn(X, y)
-                # forward
-                with torch.no_grad():    
-                    B, V = y.shape[0], tc.model_vae.vocab_size
-                    X = X.to(dist.get_device(), non_blocking=True)
-                    label_B = y.to(dist.get_device(), non_blocking=True)
-                    gt_idx_Bl: List[ITen] = tc.model_vae.img_to_idxBl(X) # This does not return None
-                    x_BLCv_wo_first_l: Ten = tc.model_vae.quantize.idxBl_to_var_input(gt_idx_Bl)
-                    tc.model(label_B, x_BLCv_wo_first_l)
-
-                router_losses = []
-                for moe_name, moe in tc.moe_modules.items():
-                    # print('tc.captured_layer_name_map[moe_name]', tc.captured_layer_name_map[moe_name])
-                    router = moe.router
-                    # print('router:', router)
-                    # print("*"*100)
-                    # print('-'*100)
-                    input = tc.saved_inputs[moe_name][0]
-                    captured_output_norm = tc.saved_output_norms[tc.captured_layer_name_map[moe_name]]
-                    # print('captured_output_norm:', captured_output_norm)
-                    # print('shape', captured_output_norm.shape)
-                    with torch.no_grad():
-                        # captured_output_norm size is (num_experts, batch_size * seq_len)
-                        router_label = captured_output_norm.view(captured_output_norm.size(0), input.size(0),
-                                                                 input.size(1))
-                        router_label = router_label.permute(1, 2, 0).detach()
-                    with tc.accelerator.autocast():
-                        router_output = router(input)
-                        router_loss = tc.router_criterion(router_output, router_label)
-                    # print('router_output:', router_output)
-                    # print('router_label:', router_label)
-                    # print(f'loss: {router_loss}')
-                    
-                    # Calculate the number of zeros and the total number of elements
-                    num_zeros_output = (router_output == 0).sum().item()
-                    total_elements_output = router_output.numel()
-                    percent_zeros_output = (num_zeros_output / total_elements_output) * 100
-
-                    num_zeros_label = (router_label == 0).sum().item()
-                    total_elements_label = router_label.numel()
-                    percent_zeros_label = (num_zeros_label / total_elements_label) * 100
-
-
-                    # print(f"Input stats: mean={input.mean().item()}, std={input.std().item()}, min={input.min().item()}, max={input.max().item()}")
-                    # print(f"Router output stats: mean={router_output.mean().item()}, std={router_output.std().item()}, min={router_output.min().item()}, max={router_output.max().item()}")
-                    # print(f"Router label stats: mean={router_label.mean().item()}, std={router_label.std().item()}, min={router_label.min().item()}, max={router_label.max().item()}")
-
-                    #print('-'*100)
-
-                    router_losses.append(router_loss)
-                    if tc.accelerator.is_main_process:
-                        tc.writer.add_scalar(f'Train/Router {moe_name} loss', router_loss.item(),
-                                             global_step=tc.state.current_batch)
-                loss = torch.stack(router_losses).mean()
-                if args.gradient_accumulation_steps > 1:
-                    loss = loss / args.gradient_accumulation_steps
-                # backward the loss
-                tc.accelerator.backward(loss)
-                running_loss += loss.item()
+            router_losses = []
+            for moe_name, moe in tc.moe_modules.items():
+                router = moe.router
+                input = tc.saved_inputs[moe_name][0]
+                captured_output_norm = tc.saved_output_norms[tc.captured_layer_name_map[moe_name]]
+                # print('captured_output_norm:', captured_output_norm)
+                # print('shape', captured_output_norm.shape)
+                with torch.no_grad():
+                    # captured_output_norm size is (num_experts, batch_size * seq_len)
+                    router_label = captured_output_norm.view(captured_output_norm.size(0), input.size(0),
+                                                                input.size(1))
+                    router_label = router_label.permute(1, 2, 0).detach()
+                with tc.accelerator.autocast():
+                    router_output = router(input)
+                    router_loss = tc.router_criterion(router_output, router_label)
                 # print('router_output:', router_output)
                 # print('router_label:', router_label)
-                print(f'loss: {loss}, router_losses: {router_losses}')
-                print('-'*100)
+                # print(f'loss: {router_loss}')
+                
+                # Calculate the number of zeros and the total number of elements
+                num_zeros_output = (router_output == 0).sum().item()
+                total_elements_output = router_output.numel()
+                percent_zeros_output = (num_zeros_output / total_elements_output) * 100
+
+                num_zeros_label = (router_label == 0).sum().item()
+                total_elements_label = router_label.numel()
+                percent_zeros_label = (num_zeros_label / total_elements_label) * 100
+
+
+                # print(f"Input stats: mean={input.mean().item()}, std={input.std().item()}, min={input.min().item()}, max={input.max().item()}")
+                # print(f"Router output stats: mean={router_output.mean().item()}, std={router_output.std().item()}, min={router_output.min().item()}, max={router_output.max().item()}")
+                # print(f"Router label stats: mean={router_label.mean().item()}, std={router_label.std().item()}, min={router_label.min().item()}, max={router_label.max().item()}")
+
+                #print('-'*100)
+
+                router_losses.append(router_loss)
+                if tc.accelerator.is_main_process:
+                    tc.writer.add_scalar(f'Train/Router {moe_name} loss', router_loss.item(),
+                                            global_step=tc.state.current_batch)
+            loss = torch.stack(router_losses).mean()
+            if args.gradient_accumulation_steps > 1:
+                loss = loss / args.gradient_accumulation_steps
+            # backward the loss
+            tc.accelerator.backward(loss)
+            running_loss += loss.item()
+            # print('router_output:', router_output)
+            # print('router_label:', router_label)
+            print(f'loss: {loss}, router_losses: {router_losses}')
+            print('-'*100)
+        if tc.accelerator.is_main_process:
+            tc.writer.add_scalar('Train/Average loss', running_loss, global_step=tc.state.current_batch)
+        if args.clip_grad_norm is not None:
+            total_norm = tc.accelerator.clip_grad_norm_(tc.model.parameters(), args.clip_grad_norm)
             if tc.accelerator.is_main_process:
-                tc.writer.add_scalar('Train/Average loss', running_loss, global_step=tc.state.current_batch)
-            if args.clip_grad_norm is not None:
-                total_norm = tc.accelerator.clip_grad_norm_(tc.model.parameters(), args.clip_grad_norm)
-                if tc.accelerator.is_main_process:
-                    tc.writer.add_scalar('Train/Gradient norm', total_norm.item(), global_step=tc.state.current_batch)
+                tc.writer.add_scalar('Train/Gradient norm', total_norm.item(), global_step=tc.state.current_batch)
 
-            # check if param is from router
-            tc.optimizer.step()
-            if tc.scheduler is not None:
-                # log LRs
-                if tc.accelerator.is_main_process:
-                    for i, lr in enumerate(get_lrs(tc.optimizer)):
-                        tc.writer.add_scalar(f'Train/Group {i} LR', lr, global_step=tc.state.current_batch)
-                if args.scheduler_class == 'reduce_on_plateau':
-                    tc.scheduler.step(loss)
-                else:
-                    tc.scheduler.step()
-            # bookkeeping
-            tc.state.current_batch += 1
-            # print("INFO: Printing grad info for all modules")
-            # for moe_name, moe in tc.moe_modules.items():
-            #     print(f"=== Gradient info for {moe_name} ===")
-            #     router = moe.router
-            #     for param_name, param in router.named_parameters():
-            #         if param.requires_grad:
-            #             if param.grad is None:
-            #                 print(f"  {param_name}: grad is None (no gradient received)")
-            #             else:
-            #                 # Print the gradient norm or any stat you want:
-            #                 print(f"  {param_name}: grad norm = {param.grad.norm().item():.6f}")
-            #         else:
-            #             print(f"  {param_name}: requires_grad=False (frozen parameter)")
+        # check if param is from router
+        tc.optimizer.step()
+        if tc.scheduler is not None:
+            # log LRs
+            if tc.accelerator.is_main_process:
+                for i, lr in enumerate(get_lrs(tc.optimizer)):
+                    tc.writer.add_scalar(f'Train/Group {i} LR', lr, global_step=tc.state.current_batch)
+            if args.scheduler_class == 'reduce_on_plateau':
+                tc.scheduler.step(loss)
+            else:
+                tc.scheduler.step()
+        # bookkeeping
+        tc.state.current_batch += 1
 
-            # if count == 10:
-            #     sfsfsdfs
-            # count += 1
+
+def final_eval(args, tc):
+    """
+    A single function that runs:
+      1) The standard evaluation from `eval_ep` in VARTrainer (loss/accuracy/flops).
+      2) The optional MoE-based evaluation (top-k or dyn-k) if `dsti_tau_to_eval` or `k_to_eval` is set.
+      3) Logs and saves everything to `tc.final_path`.
+    """
+
+    # --------------------------------------------------------
+    # A) Standard VARTrainer evaluation
+    # --------------------------------------------------------
+    L_mean, L_tail, acc_mean, acc_tail, tot, duration, model_costs, model_params = tc.trainer.eval_ep(tc.val_loader)
+
+    # Print out standard stats
+    print(f"Final evaluation (VARTrainer) completed:\n"
+          f"  Mean Loss: {L_mean:.4f}, Tail Loss: {L_tail:.4f}\n"
+          f"  Mean Accuracy: {acc_mean:.2f}%, Tail Accuracy: {acc_tail:.2f}%\n"
+          f"  Total samples: {tot}, Duration: {duration:.2f}s")
+
+    # Log them with your TensorBoard or W&B writer
+    tc.writer.add_scalar('Eval/Test loss', L_mean, global_step=tc.state.current_batch)
+    tc.writer.add_scalar('Eval/Test accuracy', acc_mean, global_step=tc.state.current_batch)
+
+    # We unwrap the model for checkpointing or direct access
+    unwrapped_model = tc.accelerator.unwrap_model(tc.model)
+
+    # Build a results dictionary to store this portion
+    final_results = {
+        'args': args,
+        'model_state': unwrapped_model.state_dict(),
+        'final_score': acc_mean,
+        'final_loss': L_mean,
+        'model_flops': model_costs.total(),
+        'model_flops_by_module': dict(model_costs.by_module()),
+        'model_flops_by_operator': dict(model_costs.by_operator()),
+        'model_params': dict(model_params),
+    }
+
+    tc.writer.add_scalar('Eval/Model FLOPs', model_costs.total(), global_step=tc.state.current_batch)
+    # If you have a key '' in model_params, you can log it:
+    if '' in model_params:
+        tc.writer.add_scalar('Eval/Model Params', model_params[''], global_step=tc.state.current_batch)
+    else:
+        # or the sum of all param counts if you prefer
+        pass
+
+    # --------------------------------------------------------
+    # B) Optional MoE-based top-k / dyn-k evaluation
+    # --------------------------------------------------------
+    # If you do *not* need MoE logic, you can skip everything below or
+    # wrap it in a condition `if tc.is_moe:` etc.
+
+    # We typically only want to do the advanced MoE evaluation once,
+    # e.g., if `tc.final_path` does not exist or if you specifically request it.
+    if not tc.final_path.exists():
+
+        # Possibly we want to save the current training state
+        if tc.accelerator.is_main_process:
+            save_state(tc.accelerator, tc.state_path)
+
+        # If you rely on gating costs, you might retrieve them from somewhere:
+        # cost_without_experts, token_expert_costs = ...
+        # For demonstration, we'll assume you have them or skip them.
+
+        final_losses = []
+        final_scores = []
+        final_flops = []
+        final_expert_average_costs = []
+        final_expert_utilization = []
+        final_total_experts = []
+
+        # Example: choose top-k or dyn-k approach
+        if args.dsti_tau_to_eval is None and args.k_to_eval is None:
+            raise ValueError('Must specify either dsti_tau_to_eval or k_to_eval for MoE final eval')
+
+        if args.dsti_tau_to_eval is not None and args.k_to_eval is not None:
+            raise ValueError('Cannot specify both tau and k for MoE final eval')
+
+        if args.dsti_tau_to_eval is not None:
+            # Evaluate for each tau
+            for tau in args.dsti_tau_to_eval:
+                if tc.accelerator.is_main_process:
+                    logging.info(f'[MoE] Testing on testset for tau={tau}.')
+                # set_for_eval_with_dynk(...) presumably changes forward_mode, sets tau, etc.
+                set_for_eval_with_dynk(tc, tau, args.dsti_expert_selection_mode)
+
+                # do your MoE evaluation. For example:
+                (test_loss, test_acc, total_average_flops,
+                 expert_avg_costs, executed_expert_tokens, total_expert_tokens) = online_evaluate_moe(
+                     tc.accelerator,
+                     tc.model,
+                     tc.test_loader,
+                     tc.criterion_type,
+                     # cost_without_experts,
+                     # token_expert_costs,
+                     batches=args.test_batches,
+                     return_counts=True
+                )
+
+                if tc.accelerator.is_main_process:
+                    final_losses.append(test_loss)
+                    final_scores.append(test_acc)
+                    final_flops.append(total_average_flops)
+                    final_expert_average_costs.append(expert_avg_costs)
+                    final_expert_utilization.append(executed_expert_tokens)
+                    final_total_experts.append(total_expert_tokens)
+
+                    tc.writer.add_scalar(f'Eval MoE (tau={tau})/Test loss',
+                                         test_loss, global_step=tc.state.current_batch)
+                    tc.writer.add_scalar(f'Eval MoE (tau={tau})/Test accuracy',
+                                         test_acc, global_step=tc.state.current_batch)
+                    tc.writer.add_scalar(f'Eval MoE (tau={tau})/Model FLOPs',
+                                         total_average_flops, global_step=tc.state.current_batch)
+
+        if args.k_to_eval is not None:
+            # Evaluate for each top-k
+            for k_to_use in args.k_to_eval:
+                if tc.accelerator.is_main_process:
+                    logging.info(f'[MoE] Testing on testset for k={k_to_use}.')
+                set_for_eval_with_topk(tc, k_to_use)  # sets forward_mode='topk', etc.
+
+               
+        # Save the MoE-specific results into final_results
+        final_results['moe_test_losses'] = final_losses
+        final_results['moe_test_scores'] = final_scores
+        final_results['moe_test_flops'] = final_flops
+        final_results['moe_expert_avg_costs'] = final_expert_average_costs
+        final_results['moe_expert_utilization'] = final_expert_utilization
+        final_results['moe_total_experts_used'] = final_total_experts
+        # If tau-based, store the list of tau, else store the list of k
+        final_results['hyperparam_values'] = args.dsti_tau_to_eval or args.k_to_eval
+
+    # --------------------------------------------------------
+    # C) Save the merged final results
+    # --------------------------------------------------------
+    if tc.accelerator.is_main_process:
+        logging.info(f"Saving final results to {tc.final_path}")
+        save_final(args, tc.final_path, final_results)
+
+
+def train(args):
+    logging.basicConfig(
+        format=(
+            '[%(levelname)s:%(process)d %(module)s:%(lineno)d %(asctime)s] ' '%(message)s'
+        ),
+        level=logging.INFO,
+        handlers=[logging.StreamHandler()],
+        force=True,
+    )
+    args: arg_util.Args = arg_util.init_dist_and_get_args(args)
+    logging.info('Configured logging')
+    tc = TrainingContext()
+    setup_accelerator(args, tc)
+    setup_files_and_logging(args, tc)
+    setup_model(args, tc)
+    setup_for_training(args, tc)
+    setup_data(args, tc)
+    setup_optimization(args, tc)
+    setup_state(tc)
+    make_vae(args, tc)
+
+    tc.trainer = VARTrainer(
+        device=args.device, # correct
+        patch_nums=args.patch_nums, # correct
+        resos=args.resos, # correct
+        vae_local=tc.model_vae,
+        var_wo_ddp=tc.model, # correct
+        var=tc.model, # correct
+        var_opt=tc.optimizer, # correct
+        label_smooth=args.ls # correct
+    )
+
+
+    training_loop(args, tc)
+    final_eval(args, tc)
+
+
+def main():
+    args = OmegaConf.merge(get_default_args(), OmegaConf.from_cli())
+    train(args)
+
+
+if __name__ == '__main__':
+    main()
+
+
+
+
+
+
 
 # def final_eval(args, tc):
 #     if not tc.final_path.exists():
@@ -462,49 +585,3 @@ def training_loop(args, tc):
 #             final_results['expert_utilization'] = final_expert_utilization
 #             final_results['total_experts_used'] = final_total_experts
 #             save_final(args, tc.final_path, final_results)
-
-
-def train(args):
-    logging.basicConfig(
-        format=(
-            '[%(levelname)s:%(process)d %(module)s:%(lineno)d %(asctime)s] ' '%(message)s'
-        ),
-        level=logging.INFO,
-        handlers=[logging.StreamHandler()],
-        force=True,
-    )
-    args: arg_util.Args = arg_util.init_dist_and_get_args(args)
-    logging.info('Configured logging')
-    tc = TrainingContext()
-    setup_accelerator(args, tc)
-    setup_files_and_logging(args, tc)
-    setup_model(args, tc)
-    setup_for_training(args, tc)
-    setup_data(args, tc)
-    setup_optimization(args, tc)
-    setup_state(tc)
-    make_vae(args, tc)
-
-    tc.trainer = VARTrainer(
-        device=args.device, # correct
-        patch_nums=args.patch_nums, # correct
-        resos=args.resos, # correct
-        vae_local=tc.model_vae,
-        var_wo_ddp=tc.model_var_wo_ddp, # correct
-        var=tc.model, # correct
-        var_opt=tc.optimizer, # correct
-        label_smooth=args.ls # correct
-    )
-
-
-    training_loop(args, tc)
-    final_eval(args, tc)
-
-
-def main():
-    args = OmegaConf.merge(get_default_args(), OmegaConf.from_cli())
-    train(args)
-
-
-if __name__ == '__main__':
-    main()

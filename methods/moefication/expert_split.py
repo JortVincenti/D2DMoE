@@ -8,7 +8,7 @@ from transformers import BertPreTrainedModel
 
 from architectures.vit import VisionTransformer as CustomVisionTransformer
 from architectures.gpt import ffn_filter_condition as ffn_filter_condition_gpt, GPT
-from architectures.moe.moe_models import ffn_filter_condition_bert, ffn_filter_condition_gemma
+from architectures.moe.moe_models import ffn_filter_condition_bert, ffn_filter_condition_gemma, ffn_filter_condition_var
 from architectures.moe.moefication import replace_with_moes, split_original_parameters
 from architectures.nlp import GemmaWrapper
 from architectures.vit import ffn_filter_condition as ffn_filter_condition_vit
@@ -16,6 +16,7 @@ from common import get_default_args, INIT_NAME_MAP
 from train import TrainingContext, setup_accelerator, setup_data, setup_optimization, setup_files_and_logging, \
     setup_state, final_eval
 from utils import load_model
+from architectures.pretrained import get_var_d16
 
 
 class ParamSplitContext(TrainingContext):
@@ -25,7 +26,8 @@ class ParamSplitContext(TrainingContext):
 
 def setup_model(args, tc):
     assert args.model_class == 'moefication'
-    base_model, base_args, _ = load_model(args, args.base_on, args.exp_id)
+    #base_model, tc.var_wo_ddp = load_model(args, args.base_on, args.exp_id)
+    base_model, tc.var_wo_ddp = get_var_d16()
     tc.orig_model = base_model
     if isinstance(base_model, (VisionTransformer, CustomVisionTransformer)):
         ffn_filter_condition = ffn_filter_condition_vit
@@ -35,10 +37,15 @@ def setup_model(args, tc):
         ffn_filter_condition = ffn_filter_condition_bert
     elif isinstance(base_model, GemmaWrapper):
         ffn_filter_condition = ffn_filter_condition_gemma
+    elif isinstance(base_model, VAR):
+        ffn_filter_condition = ffn_filter_condition_var
     else:
         raise NotImplementedError(f'Unknown model type: {type(base_model)}')
+               
     tc.model, tc.replaced_modules_list = replace_with_moes(base_model, **args.model_args,
                                                            module_filter_contition=ffn_filter_condition)
+                                                        
+    print("replaced", tc.replace_modules_list)
     init_fun = INIT_NAME_MAP[args.init_fun]
     if init_fun is not None:
         init_fun(tc.model)

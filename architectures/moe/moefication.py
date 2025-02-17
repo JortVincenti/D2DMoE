@@ -25,6 +25,8 @@ from common import ACTIVATION_NAME_MAP
 from utils import find_module_names, get_module_by_name, set_module_by_name
 from architectures.pretrained import NullDDP
 from architectures.basic_var import FFN
+from architectures.var import VAR
+import numpy as np
 
 
 class MoeficationMoE(MoELayer):
@@ -92,6 +94,10 @@ class MoeficationMoE(MoELayer):
     def forward(self, x):
         # x is of size (batch_size, sequence_length, dim)
         routing_tensor = self.gate(x)
+
+        # Check if all tensors are equal to 1
+        #assert routing_tensor.eq(1).all(), "Routing tensor is not equal to 1"
+        
         orig_size = x.size()
         x = x.view(-1, x.size(-1))
         out = self.experts(x, routing_tensor.view(-1, routing_tensor.size(-1)))
@@ -171,6 +177,7 @@ def replace_with_moes(original_model: nn.Module, num_experts: int = None, expert
     # calculate size and replace the selected layers with MoE layers
     for name in modules_to_moeify:
         replace_layer_with_moe(model, name, num_experts, expert_size, experts_class)
+
     # replace forwards so that gating data is also returned
     if isinstance(model, (VisionTransformer, CustomVisionTransformer)):
         for i in range(len(model.encoder.layers)):
@@ -209,7 +216,10 @@ def replace_with_moes(original_model: nn.Module, num_experts: int = None, expert
             # if isinstance(model.blocks[i].attn, CustomMultiheadAttention): # TODO
             #     model.blocks[i].attn.forward = partial(moe_attention_forward, model.blocks[i].attn)
         model.forward = partial(moe_var_main_forward, model)
-
+    elif isinstance(model, VAR):
+        for i in range(len(model.blocks)):
+            model.blocks[i].forward = partial(moe_var_block_forward, model.blocks[i])
+        model.forward = partial(moe_var_main_forward, model)
     else:
         raise ValueError(f'Unsupported model type: {type(model)}')
 
@@ -246,6 +256,7 @@ def param_clustering_split(ffn, moe_layer):
     #
     labels = KMeansConstrained(n_clusters=num_experts, size_min=expert_size, size_max=expert_size) \
         .fit_predict(w1_normalized.detach().cpu().numpy())
+
     # split weights into experts by labels
     if isinstance(moe_layer.experts, ModuleBatchedExperts):
         if isinstance(ffn, GemmaMLP):
@@ -277,15 +288,12 @@ def param_clustering_split(ffn, moe_layer):
                 if moe_layer.bias:
                     moe_layer.experts.layers[0].b[expert_index, :, expert_neuron_index].copy_(w1.bias[neuron_index])
                 moe_layer.experts.layers[1].w[expert_index, expert_neuron_index].copy_(w2.weight[:, neuron_index])
-                if isinstance(ffn, GemmaMLP):
-                    # Fill in the gating weights for LLaMa-type MLP
-                    moe_layer.experts.layers[2].w[expert_index, :, expert_neuron_index].copy_(w3.weight[neuron_index])
-                    if moe_layer.bias:
-                        moe_layer.experts.layers[2].b[expert_index, :, expert_neuron_index].copy_(w3.bias[neuron_index])
+               
                 filled_neuron_counts[expert_index] += 1
             # copy the last layer bias
             if moe_layer.bias:
                 moe_layer.last_bias.copy_(w2.bias)
+        
     elif isinstance(moe_layer.experts, CustomKernelExperts):
         assert moe_layer.experts.depth == 2
         with torch.no_grad():
@@ -312,19 +320,14 @@ def split_original_parameters(original_model: nn.Module, moe_model: nn.Module, r
         for index, name in enumerate(replaced_module_names):
             new_name =  name.replace("module.", "")
             replaced_module_names[index] = new_name
+
     original_model.eval()
     assert len(replaced_module_names) > 0
     # calculate size and replace the selected layers with MoE layers
     for i, name in enumerate(replaced_module_names):
         original_module = get_module_by_name(original_model, name)
         moe_module = get_module_by_name(moe_model, name)
-        if isinstance(original_model, BertForSequenceClassification):
-            # Handle spaghetti code in huggingface model
-            num_experts = moe_module.mlp.num_experts
-            moe_module = moe_module.mlp
-            name = name + '.mlp'
-        else:
-            num_experts = moe_module.num_experts
+        num_experts = moe_module.num_experts
         logging.info(f'Clustering parameters from {name} into {num_experts} experts')
         param_clustering_split(original_module, moe_module)
 

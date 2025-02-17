@@ -10,7 +10,9 @@ import dist
 from architectures import VAR, VQVAE, VectorQuantizer2
 from utils_var.amp_sc import AmpOptimizer
 from utils_var.misc import MetricLogger, TensorboardLogger
-
+from fvcore.nn import FlopCountAnalysis, parameter_count
+from eval import benchmark_with_sample
+import matplotlib.pyplot as plt
 
 Ten = torch.Tensor
 FTen = torch.Tensor
@@ -51,7 +53,8 @@ class VARTrainer(object):
         self.prog_it = 0
         self.last_prog_si = -1
         self.first_prog = True
-    
+
+
     @torch.no_grad()
     def eval_ep(self, ld_val: DataLoader):
         tot = 0
@@ -60,48 +63,150 @@ class VARTrainer(object):
         training = self.var_wo_ddp.training
         self.var_wo_ddp.eval()
 
-        # count = 0
-        device =  next(self.var_wo_ddp.parameters()).device 
-        for inp_B3HW, label_B in ld_val:
-            # if  self.var_wo_ddp.device != 'cpu':
-            #     inp_B3HW, label_B = inp_B3HW.cuda(), label_B.cuda()
+        device = next(self.var_wo_ddp.parameters()).device
 
+        ##################################################################
+        # 1. Single-batch flop analysis (same as before)
+        ##################################################################
+        inp_B3HW, label_B = next(iter(ld_val))
+        inp_B3HW = inp_B3HW.to(device, non_blocking=True)
+        label_B = label_B.to(device, non_blocking=True)
+
+        B, V = label_B.shape[0], self.vae_local.vocab_size
+        gt_idx_Bl = self.vae_local.img_to_idxBl(inp_B3HW)
+        x_BLCv_wo_first_l = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)
+        sample = (label_B, x_BLCv_wo_first_l)
+
+        print("Benchmarking...")
+        print('Final Model:', self.var_wo_ddp)
+        model_costs, param_count_dict = benchmark_with_sample(self.var_wo_ddp, sample)
+
+        ##################################################################
+        # 2. Normal evaluation loop
+        ##################################################################
+        tot = 0
+        L_mean, L_tail, acc_mean, acc_tail = 0, 0, 0, 0
+
+        last_inp_B3HW = None
+        last_logits_BLV = None
+
+        for inp_B3HW, label_B in ld_val:
             B, V = label_B.shape[0], self.vae_local.vocab_size
-            inp_B3HW = inp_B3HW.to(dist.get_device(), non_blocking=True)
-            label_B = label_B.to(dist.get_device(), non_blocking=True)
-            
-            gt_idx_Bl: List[ITen] = self.vae_local.img_to_idxBl(inp_B3HW)
+
+            inp_B3HW = inp_B3HW.to(device, non_blocking=True)
+            label_B  = label_B.to(device, non_blocking=True)
+
+            # Convert ground-truth image -> tokens
+            gt_idx_Bl = self.vae_local.img_to_idxBl(inp_B3HW)
             gt_BL = torch.cat(gt_idx_Bl, dim=1).to(device)
-            x_BLCv_wo_first_l: Ten = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)
-            
-            self.var_wo_ddp.forward
+            x_BLCv_wo_first_l = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)
+
+            # Forward pass
             logits_BLV = self.var_wo_ddp(label_B, x_BLCv_wo_first_l)
+
+            # Keep final batch data for plotting
+            last_inp_B3HW = inp_B3HW
+            last_logits_BLV = logits_BLV
+
+            # Compute losses and accuracies
             L_mean += self.val_loss(logits_BLV.data.view(-1, V), gt_BL.view(-1)) * B
-            L_tail += self.val_loss(logits_BLV.data[:, -self.last_l:].reshape(-1, V), gt_BL[:, -self.last_l:].reshape(-1)) * B
-            acc_mean += (logits_BLV.data.argmax(dim=-1) == gt_BL).sum() * (100/gt_BL.shape[1])
-            acc_tail += (logits_BLV.data[:, -self.last_l:].argmax(dim=-1) == gt_BL[:, -self.last_l:]).sum() * (100 / self.last_l)
+            L_tail += self.val_loss(
+                logits_BLV.data[:, -self.last_l:].reshape(-1, V),
+                gt_BL[:, -self.last_l:].reshape(-1)
+            ) * B
+            acc_mean += (logits_BLV.data.argmax(dim=-1) == gt_BL).sum() * (100.0 / gt_BL.shape[1])
+            acc_tail += (logits_BLV.data[:, -self.last_l:].argmax(dim=-1)
+                        == gt_BL[:, -self.last_l:]).sum() * (100.0 / self.last_l)
             tot += B
 
-            # print("*"*50)
-            # print('eval_ep', inp_B3HW.shape)
-            # print('shapes', gt_BL.shape, logits_BLV.data.argmax(dim=-1).shape)
-            # print('label', logits_BLV.data.argmax(dim=-1))
-            # print('pred', gt_BL)
-            # print('Correct' ,(logits_BLV.data.argmax(dim=-1) == gt_BL).sum() * (100/gt_BL.shape[1]))
-            # print("*"*50)
-
-            # if count == 5:
-            #     sdfsfsd
-            # else:
-            #     count += 1
+        # Restore training state if needed
         self.var_wo_ddp.train(training)
-        
+
+        # Aggregate stats across processes (if distributed)
         stats = L_mean.new_tensor([L_mean.item(), L_tail.item(), acc_mean.item(), acc_tail.item(), tot])
         dist.allreduce(stats)
         tot = round(stats[-1].item())
         stats /= tot
         L_mean, L_tail, acc_mean, acc_tail, _ = stats.tolist()
-        return L_mean, L_tail, acc_mean, acc_tail, tot, time.time()-stt
+
+        ##################################################################
+        # 3. Plotting the final batch predictions (updated)
+        ##################################################################
+        if last_inp_B3HW is not None and last_logits_BLV is not None:
+            # Convert logits to tokens (shape: [B, sum_of_scales])
+            pred_BL = last_logits_BLV.softmax(dim=-1).argmax(dim=-1)
+
+            # Instead of using a hard-coded list, build the split sizes based on the model’s patch numbers.
+            # It is assumed that self.vae_local.patch_nums holds the list of patch sizes used in autoregressive inference.
+            v_patch_nums = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
+            split_sizes = []
+            for scale in v_patch_nums: 
+                split_sizes.append(scale * scale)
+
+            # pred_BL => [B, sum_of_scales], chunk by 'split_sizes'
+            scales_tokens = torch.split(pred_BL, split_sizes, dim=1)  # => tuple of [B, pn^2]
+
+            # Decode only the final scale tokens.
+            # Note: idxBl_to_img expects a list of tokens; here we wrap the final scale tokens in a list.
+            final_scale_tokens = scales_tokens[-1]
+            pred_img_B3HW = self.vae_local.idxBl_to_img(
+                ms_idx_Bl=[final_scale_tokens],
+                same_shape=True,   # upsample smaller scales if needed
+                last_one=True      # returns a single [B, 3, H, W] image instead of a list
+            )
+
+            # Debug prints: check shapes and value ranges
+            print("GT Shape:", last_inp_B3HW.shape,
+                "GT Min/Max:", last_inp_B3HW.min().item(), last_inp_B3HW.max().item())
+            print("Pred Shape:", pred_img_B3HW.shape,
+                "Pred Min/Max:", pred_img_B3HW.min().item(), pred_img_B3HW.max().item())
+
+            # Rescale images from [-1, 1] to [0, 1] for visualization
+            true_img_B3HW = (last_inp_B3HW + 1) / 2
+            pred_img_B3HW = (pred_img_B3HW + 1) / 2
+
+            # Plot batch images
+            batch_size = last_inp_B3HW.shape[0]
+            fig, axes = plt.subplots(2, batch_size, figsize=(batch_size * 3, 6))
+
+            for i in range(batch_size):
+                true_img_np = true_img_B3HW[i].detach().cpu().permute(1, 2, 0).numpy()
+                pred_img_np = pred_img_B3HW[i].detach().cpu().permute(1, 2, 0).numpy()
+
+                # Clip the values to [0,1] for proper display
+                true_img_np = np.clip(true_img_np, 0, 1)
+                pred_img_np = np.clip(pred_img_np, 0, 1)
+
+                axes[0, i].imshow(true_img_np)
+                axes[0, i].set_title(f"GT (sample={i})")
+                axes[0, i].axis("off")
+
+                axes[1, i].imshow(pred_img_np)
+                axes[1, i].set_title(f"Prediction (sample={i})")
+                axes[1, i].axis("off")
+
+            plt.tight_layout()
+            plt.savefig("batch_predicted_images_fixed.png")
+            plt.close(fig)
+            print(f"Saved {batch_size} images in 'batch_predicted_images_fixed.png'")
+
+        ##################################################################
+        # 4. Return same outputs
+        ##################################################################
+        return (
+            L_mean,
+            L_tail,
+            acc_mean,
+            acc_tail,
+            tot,
+            time.time() - stt,
+            model_costs,
+            param_count_dict,
+        )
+
+
+
+  
     
     def train_step(
         self, it: int, g_it: int, stepping: bool, metric_lg: MetricLogger, tb_lg: TensorboardLogger,
