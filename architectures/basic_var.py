@@ -42,7 +42,6 @@ class FFN(nn.Module):
         self.drop = nn.Dropout(drop, inplace=True) if drop > 0 else nn.Identity()
     
     def forward(self, x):
-        print("FFN forward")
         if self.fused_mlp_func is not None:
             return self.drop(self.fused_mlp_func(
                 x=x, weight1=self.fc1.weight, weight2=self.fc2.weight, bias1=self.fc1.bias, bias2=self.fc2.bias,
@@ -50,6 +49,8 @@ class FFN(nn.Module):
                 heuristic=0, process_group=None,
             ))
         else:
+            #torch.set_printoptions(threshold=100, edgeitems=10)
+            #print('output FFN', self.drop(self.fc2( self.act(self.fc1(x)))))
             return self.drop(self.fc2( self.act(self.fc1(x)) ))
     
     def extra_repr(self) -> str:
@@ -87,160 +88,48 @@ class SelfAttention(nn.Module):
     
     def kv_caching(self, enable: bool): self.caching, self.cached_k, self.cached_v = enable, None, None
     
-    # # NOTE: attn_bias is None during inference because kv cache is enabled
-    # def forward(self, x, attn_bias):
-    #     B, L, C = x.shape
-    #     _ = self.mat_qkv(x) # Jort: for the sake of saving the weight in the state_dict
-        
-    #     qkv = F.linear(input=x, weight=self.mat_qkv.weight, bias=torch.cat((self.q_bias, self.zero_k_bias, self.v_bias))).view(B, L, 3, self.num_heads, self.head_dim)
-    #     main_type = qkv.dtype
-    #     # qkv: BL3Hc
-        
-    #     using_flash = self.using_flash and attn_bias is None and qkv.dtype != torch.float32
-    #     if using_flash or self.using_xform: q, k, v = qkv.unbind(dim=2); dim_cat = 1   # q or k or v: BLHc
-    #     else: q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(dim=0); dim_cat = 2               # q or k or v: BHLc
-        
-    #     if self.attn_l2_norm:
-    #         scale_mul = self.scale_mul_1H11.clamp_max(self.max_scale_mul).exp()
-    #         if using_flash or self.using_xform: scale_mul = scale_mul.transpose(1, 2)  # 1H11 to 11H1
-    #         q = F.normalize(q, dim=-1).mul(scale_mul)
-    #         k = F.normalize(k, dim=-1)
-        
-    #     if self.caching:
-    #         if self.cached_k is None: self.cached_k = k; self.cached_v = v
-    #         else: k = self.cached_k = torch.cat((self.cached_k, k), dim=dim_cat); v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
-        
-    #     dropout_p = self.attn_drop if self.training else 0.0
-    #     if using_flash:
-    #         oup = flash_attn_func(q.to(dtype=main_type), k.to(dtype=main_type), v.to(dtype=main_type), dropout_p=dropout_p, softmax_scale=self.scale).view(B, L, C)
-    #     elif self.using_xform:
-    #         oup = memory_efficient_attention(q.to(dtype=main_type), k.to(dtype=main_type), v.to(dtype=main_type), attn_bias=None if attn_bias is None else attn_bias.to(dtype=main_type).expand(B, self.num_heads, -1, -1), p=dropout_p, scale=self.scale).view(B, L, C)
-    #     else:
-    #         oup = slow_attn(query=q, key=k, value=v, scale=self.scale, attn_mask=attn_bias, dropout_p=dropout_p).transpose(1, 2).reshape(B, L, C)
-        
-    #     return self.proj_drop(self.proj(oup))
-    #     # attn = (q @ k.transpose(-2, -1)).add_(attn_bias + self.local_rpb())  # BHLc @ BHcL => BHLL
-    #     # attn = self.attn_drop(attn.softmax(dim=-1))
-    #     # oup = (attn @ v).transpose_(1, 2).reshape(B, L, -1)     # BHLL @ BHLc = BHLc => BLHc => BLC
-
+    # NOTE: attn_bias is None during inference because kv cache is enabled
     def forward(self, x, attn_bias):
-        """
-        Args:
-            x: Tensor of shape [B, L, C]
-            attn_bias: Optional attention-mask or bias (None during inference).
-        Returns:
-            Tensor of shape [B, L, C]
-        """
         B, L, C = x.shape
-
-        # 1. Use the submodule call instead of F.linear
-        #    mat_qkv is Linear(in_features=C, out_features=3*num_heads*head_dim, bias=False).
-        qkv_no_bias = self.mat_qkv(x)  # shape [B, L, 3 * num_heads * head_dim]
-
-        # 2. Manually add the custom Q / K / V biases
-        #    Your q_bias, zero_k_bias, and v_bias presumably each have shape [num_heads * head_dim].
-        #    So we cat them to produce a single big bias for Q, K, V.
-        big_bias = torch.cat((self.q_bias, self.zero_k_bias, self.v_bias), dim=0)
-        # big_bias now has shape [3 * num_heads * head_dim].
-
-        # 3. Reshape to [B, L, 3, num_heads, head_dim], then add the big_bias
-        qkv_no_bias = qkv_no_bias.view(B, L, 3, self.num_heads, self.head_dim)
-        qkv = qkv_no_bias + big_bias.view(1, 1, 3, self.num_heads, self.head_dim)
+        #_ = self.mat_qkv(x) # Jort: for the sake of saving the weight in the state_dict
+        # print('x attn:', x.sum())
+        qkv = F.linear(input=x, weight=self.mat_qkv.weight, bias=torch.cat((self.q_bias, self.zero_k_bias, self.v_bias))).view(B, L, 3, self.num_heads, self.head_dim)
         main_type = qkv.dtype
-
-        # -------------------------------------------------------------------------
-        # The remainder of the code is the same as your original logic.
-        # -------------------------------------------------------------------------
-
-        # For flash-attn or xFormers, we rely on unbind dimension:
-        using_flash = (
-            self.using_flash
-            and attn_bias is None
-            and qkv.dtype != torch.float32
-        )
-
-        if using_flash or self.using_xform:
-            # q, k, v => shape [B, L, num_heads, head_dim]
-            q, k, v = qkv.unbind(dim=2)
-            dim_cat = 1
-        else:
-            # Permute => q, k, v => shape [B, num_heads, L, head_dim]
-            # (the same as your original code)
-            q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(dim=0)
-            dim_cat = 2
-
-        # Optional L2 norm for Q, K
+        # qkv: BL3Hc
+        #print('qkv:', qkv.sum())
+        
+        using_flash = self.using_flash and attn_bias is None and qkv.dtype != torch.float32
+        if using_flash or self.using_xform: q, k, v = qkv.unbind(dim=2); dim_cat = 1   # q or k or v: BLHc
+        else: q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(dim=0); dim_cat = 2               # q or k or v: BHLc
+        
         if self.attn_l2_norm:
             scale_mul = self.scale_mul_1H11.clamp_max(self.max_scale_mul).exp()
-            if using_flash or self.using_xform:
-                # shape [1, num_heads, 1, 1] => [1, 1, num_heads, 1]
-                scale_mul = scale_mul.transpose(1, 2)
-            q = torch.nn.functional.normalize(q, dim=-1) * scale_mul
-            k = torch.nn.functional.normalize(k, dim=-1)
-
-        # Optional KV caching logic
+            if using_flash or self.using_xform: scale_mul = scale_mul.transpose(1, 2)  # 1H11 to 11H1
+            q = F.normalize(q, dim=-1).mul(scale_mul)
+            k = F.normalize(k, dim=-1)
+        
+        #print('self.cached_k:', self.cached_k.sum() if self.cached_k is not None else 0)
+        #print('self.cached_v:', self.cached_v.sum() if self.cached_v is not None else 0)
         if self.caching:
-            if self.cached_k is None:
-                self.cached_k = k
-                self.cached_v = v
-            else:
-                k = self.cached_k = torch.cat((self.cached_k, k), dim=dim_cat)
-                v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
-
-        # Determine dropout rate in training vs. inference
+            if self.cached_k is None: self.cached_k = k; self.cached_v = v
+            else: k = self.cached_k = torch.cat((self.cached_k, k), dim=dim_cat); v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
+        
+        #print('q:', q.sum(), 'k:', k.sum(), 'v:', v.sum())
         dropout_p = self.attn_drop if self.training else 0.0
-
-        # 4. Different attention paths (flash, xFormers, or slow)
         if using_flash:
-            # flash_attn_func expects [B, L, num_heads, head_dim]
-            oup = (
-                flash_attn_func(
-                    q.to(dtype=main_type),
-                    k.to(dtype=main_type),
-                    v.to(dtype=main_type),
-                    dropout_p=dropout_p,
-                    softmax_scale=self.scale,
-                )
-                .view(B, L, C)
-            )
+            oup = flash_attn_func(q.to(dtype=main_type), k.to(dtype=main_type), v.to(dtype=main_type), dropout_p=dropout_p, softmax_scale=self.scale).view(B, L, C)
         elif self.using_xform:
-            # memory_efficient_attention requires same shape + optional bias
-            # shape [B, num_heads, L, L] if attn_bias is not None
-            x_bias = (
-                None
-                if attn_bias is None
-                else attn_bias.to(dtype=main_type).expand(B, self.num_heads, -1, -1)
-            )
-            oup = (
-                memory_efficient_attention(
-                    q.to(dtype=main_type),
-                    k.to(dtype=main_type),
-                    v.to(dtype=main_type),
-                    attn_bias=x_bias,
-                    p=dropout_p,
-                    scale=self.scale,
-                )
-                .view(B, L, C)
-            )
+            oup = memory_efficient_attention(q.to(dtype=main_type), k.to(dtype=main_type), v.to(dtype=main_type), attn_bias=None if attn_bias is None else attn_bias.to(dtype=main_type).expand(B, self.num_heads, -1, -1), p=dropout_p, scale=self.scale).view(B, L, C)
         else:
-            # fallback slow-attn
-            oup = (
-                slow_attn(
-                    query=q,
-                    key=k,
-                    value=v,
-                    scale=self.scale,
-                    attn_mask=attn_bias,
-                    dropout_p=dropout_p,
-                )
-                .transpose(1, 2)
-                .reshape(B, L, C)
-            )
+            oup = slow_attn(query=q, key=k, value=v, scale=self.scale, attn_mask=attn_bias, dropout_p=dropout_p).transpose(1, 2).reshape(B, L, C)
+        
+        #print('oup:', oup.sum())
+        return self.proj_drop(self.proj(oup))
+        # attn = (q @ k.transpose(-2, -1)).add_(attn_bias + self.local_rpb())  # BHLc @ BHcL => BHLL
+        # attn = self.attn_drop(attn.softmax(dim=-1))
+        # oup = (attn @ v).transpose_(1, 2).reshape(B, L, -1)     # BHLL @ BHLc = BHLc => BLHc => BLC
 
-        # 5. Final projection + dropout
-        oup = self.proj(oup)
-        oup = self.proj_drop(oup)
-        return oup
+
 
     
     def extra_repr(self) -> str:
@@ -272,12 +161,41 @@ class AdaLNSelfAttn(nn.Module):
     
     # NOTE: attn_bias is None during inference because kv cache is enabled
     def forward(self, x, cond_BD, attn_bias):   # C: embed_dim, D: cond_dim
+        # print('x:', x.sum())
+        # print('cond_BD:', cond_BD.sum())
         if self.shared_aln:
             gamma1, gamma2, scale1, scale2, shift1, shift2 = (self.ada_gss + cond_BD).unbind(2) # 116C + B16C =unbind(2)=> 6 B1C
         else:
             gamma1, gamma2, scale1, scale2, shift1, shift2 = self.ada_lin(cond_BD).view(-1, 1, 6, self.C).unbind(2)
+        
+        # print("gamma1:", gamma1.sum())
+        # print("gamma2:", gamma2.sum())
+        # print("scale1:", scale1.sum())
+        # print("scale2:", scale2.sum())
+        # print("shift1:", shift1.sum())
+        # print("shift2:", shift2.sum())
+        # mean = x.mean(dim=-1, keepdim=True)
+        # var = x.var(dim=-1, unbiased=False, keepdim=True)
+        # print("Mean:", mean)
+        # print("Variance:", var)
+        # tmp = self.ln_wo_grad(x)
+        # print("ln_wo_grad(x):", tmp[0, :5])          # or .flatten()[:5]
+        # tmp.mul(scale1.add(1))
+        # tmp.add_(shift1)
+        # print("ln_wo_grad(x)*scale1+shift1 => attn input:", tmp[0, :5])
+        # out_attn = self.attn(tmp, attn_bias=attn_bias)
+        # print("attn_out (pre-gamma1):", out_attn[0, :5])
+        # out_attn.mul_(gamma1)
+        # print("attn_out (post-gamma1):", out_attn[0, :5])
+        # attn_input = self.ln_wo_grad(x)
+        # attn_input.mul_(scale1.add(1))
+        # attn_input.add_(shift1)
+        # print("attn_input:", attn_input.sum())
         x = x + self.drop_path(self.attn( self.ln_wo_grad(x).mul(scale1.add(1)).add_(shift1), attn_bias=attn_bias ).mul_(gamma1))
+        # print("x (post-attn):", x.sum())
         x = x + self.drop_path(self.ffn( self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2) ).mul(gamma2)) # this mul(gamma2) cannot be in-placed when FusedMLP is used
+        # print("x (post-ffn):", x.sum())
+        
         return x
     
     def extra_repr(self) -> str:

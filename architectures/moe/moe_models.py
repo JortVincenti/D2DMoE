@@ -15,6 +15,7 @@ from architectures.basic_var import AdaLNSelfAttn
 def moe_attention_forward(self: CustomMultiheadAttention, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
                           _key_padding_mask=None,
                           need_weights=False):
+    assert False, "This function should not be called directly" 
     # TODO warning! works only with "simplified" MultiheadAttention
     assert query.size() == key.size() == value.size()
     batch_size, seq_length, embed_dim = query.size()
@@ -77,41 +78,67 @@ def moe_vit_block_forward(self, input: torch.Tensor):
         y = self.mlp(y)
     return x + y, gating_data
 
-def moe_var_block_forward(self, x, cond_BD, attn_bias):  # C: embed_dim, D: cond_dim
-    gating_data = {}
-    if self.shared_aln:
-        gamma1, gamma2, scale1, scale2, shift1, shift2 = (
-            self.ada_gss + cond_BD
-        ).unbind(2)  # shape =>  (B,1,6,C)
-    else:
-        # shape => (B,1,6,C), then we unbind along dimension=2 => 6 Tensors each of shape (B,1,C)
-        gamma1, gamma2, scale1, scale2, shift1, shift2 = self.ada_lin(cond_BD).view(
-            -1, 1, 6, self.C
-        ).unbind(2)
 
-    # 1) Prepare input for attention (no in-place).
-    #    ln_wo_grad(x) => shape same as x, then multiply & add shift out-of-place
-    attn_input = self.ln_wo_grad(x) * (scale1 + 1) + shift1
-    # 2) Forward pass through attn
-    attn_out = self.attn(attn_input, attn_bias=attn_bias)
-    # 3) Multiply by gamma1 out-of-place
-    attn_out = attn_out * gamma1
-    # 4) Residual connection out-of-place
-    x = x + self.drop_path(attn_out)
+def moe_var_block_forward(self, x, cond_BD, attn_bias):
+    gating_data = {}
+    # print('-'*50)	
+    # print('x:', x.sum())
+    # print('cond_BD:', cond_BD.sum())
+
+    if self.shared_aln:
+        gamma1, gamma2, scale1, scale2, shift1, shift2 = (self.ada_gss + cond_BD).unbind(2) # 116C + B16C =unbind(2)=> 6 B1C
+    else:
+        gamma1, gamma2, scale1, scale2, shift1, shift2 = self.ada_lin(cond_BD).view(-1, 1, 6, self.C).unbind(2)
+
+    # print("gamma1:", gamma1.sum())
+    # print("gamma2:", gamma2.sum())
+    # print("scale1:", scale1.sum())
+    # print("scale2:", scale2.sum())
+    # print("shift1:", shift1.sum())
+    # print("shift2:", shift2.sum())
+    # mean = x.mean(dim=-1, keepdim=True)
+    # var = x.var(dim=-1, unbiased=False, keepdim=True)
+    # print("Mean:", mean)
+    # print("Variance:", var)
+
+    # # --- Attention path ---
+    # # 1) LN
+    # attn_input = self.ln_wo_grad(x)  # same shape as x
+    # print("ln_wo_grad(x):", attn_input[0, :5])          # or .flatten()[:5]
+    # # 2) scale in place
+    # attn_input.mul_(scale1.add(1))
+    # # 3) shift in place
+    # attn_input.add_(shift1)
+    # # 4) attn
+    
+    # print("ln_wo_grad(x)*scale1+shift1 => attn input:", attn_input[0, :5])         # or .flatten()[:5]
+
+    # attn_out = self.attn(attn_input, attn_bias=attn_bias)
+    # # 5) multiply by gamma1 in place
+    # print("attn_out (pre-gamma1):", attn_out[0, :5])
+    # attn_out.mul_(gamma1)
+    # print("attn_out (post-gamma1):", attn_out[0, :5])
+    # # 6) residual
+    # x = x + self.drop_path(attn_out)
+
+    # attn_input = self.ln_wo_grad(x)
+    # attn_input.mul_(scale1.add(1))
+    # attn_input.add_(shift1)
+    # print("attn_input:", attn_input.sum())
+    x = x + self.drop_path(self.attn(self.ln_wo_grad(x).mul(scale1.add(1)).add_(shift1), attn_bias=attn_bias).mul_(gamma1))
+    # print("x (post-attn):", x.sum())
+
+
 
     if isinstance(self.ffn, MoELayer):
-        # 5) Prepare input for MoE (no in-place).
-        ffn_input = self.ln_wo_grad(x) * (scale2 + 1) + shift2
-        # 6) Forward pass through MoE
-        y, ffn_gating_data = self.ffn(ffn_input)
-        # 7) Multiply by gamma2 and residual connection
-        x = x + self.drop_path(y * gamma2)
+        y, ffn_gating_data = self.ffn(self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2))
+        x = x + self.drop_path(y.mul(gamma2))
+
         gating_data.update(ffn_gating_data)
     else:
-        # 5) Prepare input for normal FFN (no in-place).
-        ffn_input = self.ln_wo_grad(x) * (scale2 + 1) + shift2
-        # 6) Multiply by gamma2 out-of-place, then residual
-        x = x + self.drop_path(self.ffn(ffn_input) * gamma2)
+        x = x + self.drop_path(self.ffn(self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2)).mul(gamma2))
+   
+    # print("x (post-ffn):", x.sum())
 
     return x, gating_data
 
@@ -198,6 +225,7 @@ def moe_var_main_forward(
     # -------------------------------------------------------------------------
     # 1) Move inputs onto the correct device(s)
     # -------------------------------------------------------------------------
+    assert False, "This function should not be called directly"
     device_class = self.class_emb.weight.device  # device of class_emb
     if class_idx is not None and class_idx.device != device_class:
         class_idx = class_idx.to(device_class)

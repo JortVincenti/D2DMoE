@@ -18,6 +18,7 @@ from architectures.helpers import gumbel_softmax_with_rng, sample_with_top_k_top
 #import utils
 import numpy as np
 import dist
+import pickle
 
 #from trainer import VARTrainer
 
@@ -839,55 +840,58 @@ def compute_tau_routing(moe, tau, x_shape, x):
     
 
 
-def run_inference_with_tau(tc, x, moe_modules, cond_BD_or_gss, tau, checkperscalelist):
-    """Helper to run the second pass with the TAU-based gating."""
-    # Now that we've built new_routing, run the second pass:
+def run_inference_with_tau(tc, x, moe_modules, cond_BD_or_gss, tau, debug_data, si):
+    """
+    Helper to run the second pass with the TAU-based gating in the MoE model (tc.model)
+    """
+    list_of_outputs = []
     for index, b in enumerate(tc.model.blocks):
+        # 1) Build TAU-based routing for the current MoE block
         compute_tau_routing(moe_modules[index], tau, x.shape, x)
-        #print(moe_modules[index].last_routing_mask)
-        # check all values are one 
-        #assert moe_modules[index].last_routing_mask.all(), "All values should be one"
-        out = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
+        
+        # 2) Identify the corresponding block in the base model
+        moeblock  = tc.model.blocks[index]
+        out = moeblock(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
         x = out[0] if isinstance(out, tuple) else out
-        # if not torch.allclose(x, checkperscalelist[index], rtol=1e-5, atol=1e-6):
-        #     diff = x - checkperscalelist[index]
-        #     abs_diff = diff.abs()
-        #     mismatch_mask = abs_diff > 1e-7  # or your chosen threshold
-            
-        #     num_mismatch = mismatch_mask.sum().item()
-        #     total_elems = x.numel()
-            
-        #     # Print stats
-        #     print(f"[DEBUG] Tensors differ: {num_mismatch} elements out of {total_elems}")
-        #     if num_mismatch > 0:
-        #         sum_diff = abs_diff[mismatch_mask].sum().item()
-        #         max_diff = abs_diff[mismatch_mask].max().item()
-        #         print(f"[DEBUG] sum of differences in mismatched elements: {sum_diff}")
-        #         print(f"[DEBUG] max difference in mismatched elements: {max_diff}")
-        #         print(f"[DEBUG] some mismatch values: {abs_diff[mismatch_mask][:10]}")
-    return x
+        list_of_outputs.append(x.clone())
 
+    return x, list_of_outputs
+
+def max_difference(expected, got):
+    """
+    Compute the maximum absolute difference between two tensors or arrays.
+    Both expected and got should be either numpy arrays or torch.Tensors.
+    If they are torch.Tensors, they are moved to CPU and converted to numpy arrays.
+    """
+    expected_np = expected.cpu().numpy() if isinstance(expected, torch.Tensor) else expected
+    got_np = got.cpu().numpy() if isinstance(got, torch.Tensor) else got
+    return np.abs(expected_np - got_np).max()
 
 @torch.no_grad()
 def autoregressive_infer_cfg_with_expert_plot(
-    tc, 
+    tc,
+    B: int,
+    label_B: Optional[Union[int, torch.LongTensor]], 
     g_seed: Optional[int] = None, 
     cfg: float = 1.5, 
     top_k: int = 0, 
     top_p: float = 0.0,
+    rng = 0,
     more_smooth: bool = False,
     tau: float = 1.0,
+    debug_data = None, 
+    type_of_model: str = "MoE_no_FT",
 ) -> torch.Tensor:
     """
     Autoregressive inference with CFG and two-pass TAU-based expert selection,
     with extensive debug prints for intermediate tensor shapes and values.
 
     This function performs an iterative, scale-wise generation. For each scale:
-      1. FIRST PASS: Force all experts to run by overriding each MoE module’s gate with a capturing function.
+      1. FIRST PASS: Force all experts to run by overriding each MoE modules gate with a capturing function.
          This saves the tokenized input in m.last_router_input.
       2. TAU-BASED Mask Computation: Using the captured input, run the first expert layer from each MoE module
          to compute L2 norms and then threshold them to form a binary mask (new_routing).
-         The mask is saved in m.last_routing_mask and the module’s gate is overridden to return it.
+         The mask is saved in m.last_routing_mask and the modules gate is overridden to return it.
       3. SECOND PASS: Re-run the blocks with the TAU-filtered experts to get logits, apply CFG (if applicable),
          and sample tokens.
       4. Update latent representation using these sampled tokens.
@@ -895,19 +899,15 @@ def autoregressive_infer_cfg_with_expert_plot(
          Top row: predicted images at each scale plus the final (ground truth) image.
          Bottom row: corresponding expert usage heatmaps.
     """
-    # Set RNG if provided. Correct
-    if g_seed is not None:
-        tc.model.rng.manual_seed(g_seed)
-        rng = tc.model.rng
-    else:
-        rng = None
 
-    # Get one batch from the validation loader. Correct
-    inp_B3HW, label_B = next(iter(tc.val_loader))
-    # For debugging: use only the first sample in the batch. Correct
-    inp_B3HW, label_B = inp_B3HW[:1], label_B[:1]
-    B = label_B.size(0)
     #print(f"[DEBUG] Batch size B: {B}") # Correct
+    if g_seed is None: rng = None
+    else: self.rng.manual_seed(g_seed); rng = self.rng
+
+    if label_B is None:
+        label_B = torch.multinomial(self.uniform_prob, num_samples=B, replacement=True, generator=rng).reshape(B)
+    elif isinstance(label_B, int):
+        label_B = torch.full((B,), fill_value=self.num_classes if label_B < 0 else label_B, device=self.lvl_1L.device)
 
     # Prepare conditioning tokens and positional embeddings.
     cond_BD = sos = tc.model.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=tc.model.num_classes)), dim=0))
@@ -919,9 +919,7 @@ def autoregressive_infer_cfg_with_expert_plot(
 
     # Initialize latent representation.
     f_hat = sos.new_zeros(B, tc.model.Cvae, tc.model.patch_nums[-1], tc.model.patch_nums[-1])
-    #print(f"[DEBUG] f_hat shape: {f_hat.shape}")
 
-    # Until here is correct
     for b in tc.model.blocks:
         b.attn.kv_caching(True)
 
@@ -930,157 +928,197 @@ def autoregressive_infer_cfg_with_expert_plot(
     #print(f"[DEBUG] Found {len(moe_modules)} MoE modules.")
     original_gates = {m: m.gate for m in moe_modules}
 
-    # Prepare lists to store tokens and expert usage per scale.
-    scale_tokens_list = []        # Will store sampled tokens per scale.
-    scale_expert_usage_list = []    # Will store expert usage per scale (averaged over batch).
     cur_L = 0
     num_scales = len(tc.model.patch_nums)
-    my_cache = []
+
+
+
+    predicted_dictionary = {
+            "f_hat": [],
+            "idx_Bl": [],
+            "h_BChw": [],
+            "logits_BlV": [],
+            "ratio": [],
+            'next_token_map': [],
+            'x': [],
+            'cond_BD_or_gss': [],
+            'block_output': [],
+            'experts_per_token': [],
+            'img': [],    
+    }
+
     # Iterate over scales.
     for si, pn in enumerate(tc.model.patch_nums):
         ratio = si / tc.model.num_stages_minus_1
+        predicted_dictionary['ratio'].append(ratio)
+
         cur_L += pn * pn
 
         # Compute conditioning for this scale.
         cond_BD_or_gss = tc.model.shared_ada_lin(cond_BD)
-        x = next_token_map  # Autoregressive token input.
-        x_test = x.clone()  # Copy for visualization.
-        x_copy = x.clone()  # Copy for visualization.
-        # 1) Set up hooks only on the final sub-layer of each expert
-        attach_final_expert_hooks(moe_modules, x)
-        checkperscalelist = []
+        predicted_dictionary['cond_BD_or_gss'].append(cond_BD_or_gss.detach().cpu().clone())
 
-        # 2) First pass: force all experts, gather outputs
+        x = next_token_map  # Autoregressive token input.
+        x_copy = x.clone()  # Copy
+
+        attach_final_expert_hooks(moe_modules, x)
+
+        list_of_cached_k = [b.attn.cached_k for b in tc.model.blocks]
+        list_of_cached_v = [b.attn.cached_v for b in tc.model.blocks]
+        
         for b in tc.model.blocks:
             out = b(x=x_copy, cond_BD=cond_BD_or_gss, attn_bias=None)
             x_copy = out[0] if isinstance(out, tuple) else out
-            checkperscalelist.append(x_copy.clone())
-    
-        if len(my_cache) == 0:
-            for b in tc.model.blocks:
-                b.attn.cached_k = None
-                b.attn.cached_v = None
 
-        for b, entry in zip(tc.model.blocks, my_cache):
-            b.attn.cached_k = entry["cached_k"]
-            b.attn.cached_v = entry["cached_v"]
+        # Restore cached keys and values
+        for b, cached_k, cached_v in zip(tc.model.blocks, list_of_cached_k, list_of_cached_v):
+            b.attn.cached_k = cached_k
+            b.attn.cached_v = cached_v
 
-        # Assert that x is still the same
-        assert torch.allclose(x, x_test), "x and x_copy should be the same after the first pass."
+
         # 4) Second pass: run with new gating
-        
-        x = run_inference_with_tau(tc, x, moe_modules, cond_BD_or_gss, tau, checkperscalelist)
+        x, list_of_outputs = run_inference_with_tau(tc, x, moe_modules, cond_BD_or_gss, tau, predicted_dictionary, si)
+        predicted_dictionary['x'].append(x.detach().cpu().clone())
+        predicted_dictionary['block_output'].append(list_of_outputs)
+            
+        # We'll store a list of usage maps for each scale. 
+        usage_list_for_this_scale = []
+        for idx in range(len(moe_modules)-1):
+            moex = moe_modules[idx]
+            usage_list_for_this_scale.append(moex.last_expert_usage.clone())  
+        predicted_dictionary['experts_per_token'].append(usage_list_for_this_scale)
 
-        my_cache = []
-        for b in tc.model.blocks:
-            # If the attention’s caching is enabled
-            # and we have some cached_k, cached_v:
-            cache_entry = {
-                "cached_k": b.attn.cached_k.clone() if b.attn.cached_k is not None else None,
-                "cached_v": b.attn.cached_v.clone() if b.attn.cached_v is not None else None,
-            }
-            my_cache.append(cache_entry)
 
-        
-        # Correct
-        last_moe = moe_modules[8]
-        if hasattr(last_moe, 'last_expert_usage'):
-            # shape (B, T). If B=1, then shape is (1, T). 
-            usage_map = last_moe.last_expert_usage
-            scale_expert_usage_list.append(usage_map.clone())
-        else:
-            scale_expert_usage_list.append(None)
-        
         logits_BlV = tc.model.get_logits(x, cond_BD)
-
-        #print(f"[DEBUG] logits_BlV shape before CFG adjustment: {logits_BlV[0]}")
-
-        # print(f"[DEBUG] logits_BlV shape before CFG adjustment: {logits_BlV.shape}")
         t = cfg * ratio
         logits_BlV = (1 + t) * logits_BlV[:B] - t * logits_BlV[B:]
-        #print(f"[DEBUG] logits_BlV shape after CFG adjustment: {logits_BlV[0]}")
+        predicted_dictionary['logits_BlV'].append(logits_BlV.detach().cpu().clone())
+
         idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0] # same output
-        # print(f"[DEBUG] idx_Bl shape: {idx_Bl.shape}, sample tokens: {idx_Bl}")
-        #print(f"[DEBUG] idx_Bl shape: {idx_Bl.shape}, sample tokens: {idx_Bl[0]}")
+        predicted_dictionary['idx_Bl'].append(idx_Bl.detach().cpu().clone())
        
         # --- Update latent representation ---
-        h_BChw = tc.model_vae.quantize.embedding(idx_Bl)
-        #print(f"[DEBUG] h_BChw shape: {h_BChw[0]}") 
-        h_BChw = h_BChw.transpose_(1, 2).reshape(B, tc.model.Cvae, pn, pn)
-        #print(f"[DEBUG] h_BChw shape: {h_BChw[0]}")
+        h_BChw =  tc.model.vae_quant_proxy[0].embedding(idx_Bl)
+        predicted_dictionary['h_BChw'].append(h_BChw.detach().cpu().clone())
 
-        
-        f_hat, next_token_map = tc.model_vae.quantize.get_next_autoregressive_input(si, num_scales, f_hat, h_BChw) #tc.model.vae_quant_proxy[0].get_next_autoregressive_input(si, num_scales, f_hat, h_BChw)
-        # print('sample f_hat:', f_hat[0, 0, 0], f_hat[0, 0, 1], f_hat[0, 0, 2])
-        # print('sample next token:', next_token_map[0], next_token_map[0], next_token_map[0])
-        # print(f"[DEBUG] After latent update, f_hat shape: {f_hat.shape}, next_token_map shape: {next_token_map.shape}")
-        scale_tokens_list.append(f_hat.clone())
+        h_BChw = h_BChw.transpose_(1, 2).reshape(B, tc.model.Cvae, pn, pn)
+
+        f_hat, next_token_map = tc.model.vae_quant_proxy[0].get_next_autoregressive_input(si, num_scales, f_hat, h_BChw)
+        predicted_dictionary['f_hat'].append(f_hat.clone())
+
+        final_img = tc.model_vae.fhat_to_img(f_hat.clone())
+        img = final_img[0].add_(1).mul_(0.5).permute(1, 2, 0).mul(255).clamp(0,255).cpu().numpy().astype(np.uint8)
+        predicted_dictionary['img'].append(img)
 
         if si != tc.model.num_stages_minus_1:
             next_token_map = next_token_map.view(B, tc.model.Cvae, -1).transpose(1, 2)
-            #print('sample next token:', next_token_map[0], next_token_map[0], next_token_map[0])
-            # print(f"[DEBUG] next_token_map after view and transpose: {next_token_map.shape}")
-            next_token_map = tc.model.word_embed(next_token_map) + lvl_pos[:, cur_L:cur_L + tc.model.patch_nums[si + 1] ** 2]
-            #print('sample next token:', next_token_map[0], next_token_map[0], next_token_map[0])
-            # print(f"[DEBUG] next_token_map after word_embed and addition: {next_token_map.shape}")        
+            next_token_map = tc.model.word_embed(next_token_map) + lvl_pos[:, cur_L:cur_L + tc.model.patch_nums[si + 1] ** 2]     
             next_token_map = next_token_map.repeat(2, 1, 1)
-            #print('sample next token:', next_token_map[0], next_token_map[0], next_token_map[0])
-            # print(f"[DEBUG] Final next_token_map shape: {next_token_map.shape}")
+            predicted_dictionary['next_token_map'].append(next_token_map.detach().cpu().clone())
 
+    for b in tc.model.blocks:
+        b.attn.kv_caching(False)
 
-    # --- Visualization ---
-    num_scales = len(scale_tokens_list)
-    fig, axes = plt.subplots(2, num_scales + 1, figsize=((num_scales + 1) * 3, 6))
-    batch_idx = 0  # Visualize the first sample.
+    for si, pn in enumerate(tc.model.patch_nums):
+            print()
+            print("-"*50)
+            print(f"[DEBUG] Scale {si} started.")
+            print("-"*50)
+            print()
 
-    # Top row: predicted images at each scale.
-    for i, latent in enumerate(scale_tokens_list):
-        # latent should have shape (B, Cvae, H, W) with B=1.
-        final_img = tc.model_vae.fhat_to_img(latent) 
-        img = final_img[0].permute(1,2,0).mul(255).clamp(0,255).cpu().numpy().astype(np.uint8)
-        axes[0, i].imshow(img)
-        axes[0, i].set_title(f"Scale {i+1} ({tc.model.patch_nums[i]}x{tc.model.patch_nums[i]})")
-        axes[0, i].axis("off")
-    # Last column: ground truth final image.
-    gt_img = inp_B3HW[0].detach().cpu().permute(1,2,0).numpy().clip(0,1).astype(np.float32)
-    axes[0, num_scales].imshow(gt_img)
-    axes[0, num_scales].set_title("Ground Truth Final")
-    axes[0, num_scales].axis("off")
-
-    # Bottom row: expert usage heatmaps per scale.
-    if scale_expert_usage_list is not None:
-        for i in range(num_scales):
-            if scale_expert_usage_list[i] is not None:
-                pn = tc.model.patch_nums[i]
-                usage = scale_expert_usage_list[i]
-                if usage.numel() >= pn * pn:
-                    usage_img = usage[:pn*pn].reshape(pn, pn)
-                else:
-                    usage_img = usage.reshape(pn, pn)
-                usage_img_np = usage_img.cpu().numpy().astype(np.float32)
-                axes[1, i].imshow(usage_img_np, cmap="viridis", aspect="auto")
-                axes[1, i].set_title("Experts Used")
-                axes[1, i].axis("off")
-                for (m, n), val in np.ndenumerate(usage_img_np):
-                    axes[1, i].text(n, m, int(val), ha='center', va='center', color='white', fontsize=8)
+            
+            if np.allclose(debug_data['ratio'][si], predicted_dictionary['ratio'][si]):
+                print(f"[DEBUG] ratio for scale {si} are correct.")
             else:
-                axes[1, i].axis("off")
-    axes[1, num_scales].axis("off")
+                print(f"[DEBUG] ratio for scale {si} are incorrect.")
+                print(f"[DEBUG] Expected: {debug_data['ratio'][si]}")
+                print(f"[DEBUG] Got: {predicted_dictionary['ratio'][si]}")
 
-    plt.tight_layout()
-    plt.savefig(f"plots_with_tau/multi_scale_experts_{tau}.png")
-    plt.close(fig)
-    print(f"[DEBUG] Visualization saved as plots_with_tau/multi_scale_experts_{tau}.png")
+            if np.allclose(debug_data['cond_BD_or_gss'][si].cpu().numpy(), predicted_dictionary['cond_BD_or_gss'][si].cpu().numpy()):
+                print(f"[DEBUG] cond_BD_or_gss for scale {si} are correct.")
+            else:
+                print(f"[DEBUG] cond_BD_or_gss for scale {si} are incorrect.")
+                print(f"[DEBUG] Expected: {debug_data['cond_BD_or_gss'][si]}, sum of expected: {debug_data['cond_BD_or_gss'][si].sum()}")
+                print(f"[DEBUG] Got: {predicted_dictionary['cond_BD_or_gss'][si].cpu().numpy()}, sum of got: {predicted_dictionary['cond_BD_or_gss'][si].cpu().numpy().sum()}")
+                print(f"[DEBUG] max difference: {max_difference(debug_data['cond_BD_or_gss'][si], predicted_dictionary['cond_BD_or_gss'][si].cpu().numpy())}")
+
+
+            if np.allclose(debug_data['x'][si].cpu().numpy(), predicted_dictionary['x'][si].cpu().numpy()):
+                print(f"[DEBUG] x for scale {si} are correct.")
+            else:
+                print(f"[DEBUG] x for scale {si} are incorrect.")
+                print(f"[DEBUG] sum of expected: {debug_data['x'][si].sum()}") # Expected: {debug_data['x'][si]}, 
+                print(f"[DEBUG] sum of got: { predicted_dictionary['x'][si].cpu().numpy().sum()}") # Got: {x}
+                print(f"[DEBUG] max difference: {max_difference(debug_data['x'][si],  predicted_dictionary['x'][si].cpu().numpy())}")
+            
+            if np.allclose(debug_data['logits_BlV'][si].cpu().numpy(), predicted_dictionary['logits_BlV'][si].cpu().numpy()):
+                print(f"[DEBUG] logits_BlV for scale {si} are correct.")
+            else:
+                print(f"[DEBUG] logits_BlV for scale {si} are incorrect.")
+                print(f"[DEBUG] sum of expected: {debug_data['logits_BlV'][si].sum()}") #  Expected: {debug_data['logits_BlV'][si]},
+                print(f"[DEBUG] sum of got: {predicted_dictionary['logits_BlV'][si].cpu().numpy().sum()}") #  Got: {logits_BlV},
+                print(f"[DEBUG] max difference: {max_difference(debug_data['logits_BlV'][si], predicted_dictionary['logits_BlV'][si].cpu().numpy())}")
+
+            if np.allclose(debug_data['idx_Bl'][si].cpu().numpy(),predicted_dictionary['idx_Bl'][si].cpu().numpy()):
+                print(f"[DEBUG] idx_Bl for scale {si} are correct.")
+            else:
+                print(f"[DEBUG] idx_Bl for scale {si} are incorrect.")
+                print(f"[DEBUG] sum of expected: {debug_data['idx_Bl'][si].sum()}") #  Expected: {debug_data['idx_Bl'][si]},
+                print(f"[DEBUG] sum of got: {predicted_dictionary['idx_Bl'][si].cpu().numpy().sum()}") # Got: {idx_Bl},
+                print(f"[DEBUG] max difference: {max_difference(debug_data['idx_Bl'][si], predicted_dictionary['idx_Bl'][si].cpu().numpy())}")
+
+
+            if np.allclose(debug_data['h_BChw'][si].cpu().numpy(),predicted_dictionary['h_BChw'][si].cpu().numpy()):
+                print(f"[DEBUG] h_BChw for scale {si} are correct.")
+            else:
+                print(f"[DEBUG] h_BChw for scale {si} are incorrect.")
+                print(f"[DEBUG] sum of expected: {debug_data['h_BChw'][si].sum()}") # Expected: {debug_data['h_BChw'][si]},
+                print(f"[DEBUG] sum of got: {predicted_dictionary['h_BChw'][si].cpu().numpy().sum()}") # Got: {h_BChw},
+                print(f"[DEBUG] max difference: {max_difference(debug_data['h_BChw'][si], predicted_dictionary['h_BChw'][si].cpu().numpy())}")
+
+
+            for index in range(16):
+                if np.allclose(debug_data['block_output'][si][index].cpu().numpy(), predicted_dictionary['block_output'][si][index].cpu().numpy()):
+                    print(f"[DEBUG] x for scale {si} for block {index} are correct.")
+                else:
+                    print(f"[DEBUG] x for scale {si} for block {index} are incorrect.")
+                    print(f"[DEBUG]  sum of expected: {debug_data['block_output'][si][index].sum()}") #Expected: {debug_data['block_output'][si][index]},
+                    print(f"[DEBUG]  sum of got: { predicted_dictionary['block_output'][si][index].sum()}") # Got: {x},
+
+
+            if np.allclose(debug_data['f_hat'][si].cpu().numpy(),predicted_dictionary['f_hat'][si].cpu().numpy()):
+                print(f"[DEBUG] f_hat for scale {si} are correct.")
+            else:
+                print(f"[DEBUG] f_hat for scale {si} are incorrect.")
+                print(f"[DEBUG] sum of expected: {debug_data['f_hat'][si].sum()}") # Expected: {debug_data['f_hat'][si]},
+                print(f"[DEBUG] sum of got: {predicted_dictionary['f_hat'][si].cpu().numpy().sum()}") # Got: {f_hat},
+                print(f"[DEBUG] max difference: {max_difference(debug_data['f_hat'][si], predicted_dictionary['f_hat'][si].cpu().numpy())}")
+
+            if si < len(tc.model.patch_nums) - 1:
+                if np.allclose(debug_data['next_token_map'][si].cpu().numpy(),predicted_dictionary['next_token_map'][si].cpu().numpy()):
+                    print(f"[DEBUG] next_token_map for scale {si} are correct.")
+                else:
+                    print(f"[DEBUG] next_token_map for scale {si} are incorrect.")
+                    print(f"[DEBUG] sum of expected: {debug_data['next_token_map'][si].sum()}") # Expected: {debug_data['next_token_map'][si]}, 
+                    print(f"[DEBUG] sum of got: {predicted_dictionary['next_token_map'][si].cpu().numpy().sum()}") # Got: {next_token_map}, 
+                    print(f"[DEBUG] max difference: {max_difference(debug_data['next_token_map'][si], predicted_dictionary['next_token_map'][si].cpu().numpy())}")
+            
+            print()
+            print("-"*50)
+            print(f"[DEBUG] Scale {si} completed.")
+            print("-"*50)
+            print()
+
+
+    with open(f"data/{type_of_model}_with_tau_{tau}.pkl", "wb") as f:
+        pickle.dump(predicted_dictionary, f)
+        print(f"[DEBUG] Saved the data to data/{type_of_model}_with_tau_{tau}.pkl")
 
     # Restore original MoE gate functions.
     for m in moe_modules:
-         m.gate = original_gates[m]
+        m.gate = original_gates[m]
 
-    return final_img
-
-
-
-
+    return tc.model_vae.fhat_to_img(f_hat).add_(1).mul_(0.5)
 
 
 

@@ -28,3 +28,5 @@ Thumbs.db
 D2DMoE/shared/*
 shared/*
 local_output/stdout.txt
+D2DMoE/data/*
+data/*

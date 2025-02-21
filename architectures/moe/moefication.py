@@ -101,11 +101,14 @@ class MoeficationMoE(MoELayer):
         orig_size = x.size()
         x = x.view(-1, x.size(-1))
         out = self.experts(x, routing_tensor.view(-1, routing_tensor.size(-1)))
+
         if self.bias:
             out = out + self.last_bias
         if self.add_residual_connection:
             out = out + x
         out = out.view(orig_size)
+        #torch.set_printoptions(threshold=100, edgeitems=10)
+        #print("MoE output:", out, out.dtype, x.dtype)
         return out, {self.name: (routing_tensor,)}
 
 

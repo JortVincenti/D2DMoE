@@ -44,6 +44,7 @@ class ExecuteAllExpertsLayer(nn.Module):
         x = torch.einsum('eni,eio->eno', x, self.w)
         if self.bias:
             x = x + self.b
+
         return self.act(x)
 
 

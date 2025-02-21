@@ -23,7 +23,13 @@ from architectures.pretrained import get_var_d16
 from pathlib import Path
 from architectures.moe.dsti import replace_with_relu
 from architectures.moe.dsti import find_gelu_activations
-
+import copy
+import PIL.Image as PImage, PIL.ImageDraw as PImageDraw
+import random
+import torch, torchvision
+import numpy as np
+import os
+from collections import OrderedDict
 
 class RouterTrainingContext(TrainingContext):
     moe_modules: Dict[str, nn.Module] = None
@@ -33,46 +39,183 @@ class RouterTrainingContext(TrainingContext):
     hook_handles: List = None
     router_criterion_type: Type = None
     router_criterion: Callable = None
+    initial_model = None
 
+
+def make_image(var, args):
+    ############################# 2. Sample with classifier-free guidance
+    # set args
+    seed = 0 #@param {type:"number"}
+    torch.manual_seed(seed)
+    num_sampling_steps = 250 #@param {type:"slider", min:0, max:1000, step:1}
+    cfg = 4 #@param {type:"slider", min:1, max:10, step:0.1}
+    class_labels = (0,)  #@param {type:"raw"}
+    more_smooth = False # True for more smooth output
+
+
+    # seed
+    torch.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+    # run faster
+    tf32 = True
+    torch.backends.cudnn.allow_tf32 = bool(tf32)
+    torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
+    torch.set_float32_matmul_precision('high' if tf32 else 'highest')
+
+    # sample
+
+    B = len(class_labels)
+    label_B: torch.LongTensor = torch.tensor(class_labels, device=args.device)
+
+    with torch.inference_mode():
+        with torch.autocast('cuda', enabled=True, dtype=torch.float32, cache_enabled=True):    # using bfloat16 can be faster
+            recon_B3HW, debug_data = var.autoregressive_infer_cfg(B=B, label_B=label_B, cfg=cfg, top_k=900, top_p=0.95, g_seed=seed, more_smooth=more_smooth, plotting_PCA=False)
+
+    return debug_data
 
 def setup_model(args, tc):
     assert args.model_class == 'dsti_router'
 
     # Base class
-    model, _ = get_var_d16()
+    model, tc.model_vae = get_var_d16()
+    tc.initial_model = copy.deepcopy(model)
+    debug_data = make_image(tc.initial_model, args)
 
-    # Sparsity
-    if True:	
+    initial_weights = {}
+    for name, param in model.named_parameters():
+        initial_weights[name] = param.clone()
+
+
+    # Include Sparsity or not
+    include_sparsity = False
+    if include_sparsity:	
         final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_enforce_sparsity_C5DOGOFE_1/final.pth')
         final_state = torch.load(final_path, map_location=args.device)
-        state_dict = final_state['model_state'] # Jort: This is the state dict that is loaded
+        state_dict = final_state['model_state'] 
         model_arg = final_state['args'].model_args
         activations_to_sparsify = find_gelu_activations(model, **model_arg)
         model = replace_with_relu(model, activations_to_sparsify)
         model = model.to(args.device)
-        model.load_state_dict(state_dict)
-    
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            new_key = k.replace("module.", "")
+            new_state_dict[new_key] = v
 
-    # Get the MoE model without router.
-    if True:
-        final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_dsti_expert_split_4KAHVWXI_1/final.pth')
+        model.load_state_dict(new_state_dict)
+        final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_dsti_expert_split_4KAHVWXI_1/final.pth')        
     else:
         final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_dsti_expert_split_FANB4KGP_1/final.pth')
 
 
     final_state = torch.load(final_path, map_location=args.device)
-    state_dict = final_state['model_state'] # Jort: This is the state dict that is loaded
+    state_dict = final_state['model_state']
     model_arg = final_state['args'].model_args
     model, _ = replace_with_moes(model, **model_arg, module_filter_contition=dsti_mlp_filter_condition)
     model = model.to(args.device)
 
-    
     model.load_state_dict(state_dict)
     tc.moe_modules = add_routers(model, args.model_args)
     init_fun = INIT_NAME_MAP[args.init_fun]
     if init_fun is not None:
         init_fun(tc.model)
+
     tc.model = tc.accelerator.prepare(model)
+
+    
+    # Compare the parameters (excluding FFN parameters)
+
+    # Check non-FFN parameters normally:
+    for name, param in tc.model.named_parameters():
+        if "ffn" not in name:
+            if not torch.allclose(param, initial_weights[name], rtol=0, atol=0):
+                print(f"Parameter {name} changed!")
+ 
+
+    # Now check each block's FFN experts:
+    
+    for i, block in enumerate(tc.model.blocks):
+        if hasattr(block, "ffn") and hasattr(block.ffn, "experts"):
+            expert_weights = [expert.w.data for expert in block.ffn.experts.layers]
+            
+            # Check fc1 and fc2
+            for jk in range(1, 3):
+                ffn_key = f"blocks.{i}.ffn.fc{jk}.weight"
+                if ffn_key not in initial_weights:
+                    print(f"Block {i}: Key {ffn_key} not found in initial weights.")
+                    continue
+
+                original_ffn_weight = initial_weights[ffn_key]
+
+                # 1) We'll just check the sum of all experts' weights
+                #    to see if it's the same as the sum of the original layer's weight.
+                # For example, sum up absolute or plain sums, or do a norm, etc.
+                # We'll do a plain sum here.
+                expert_sum = 0.0
+                for w in expert_weights[jk - 1]:  # w => shape [whatever dims…]
+                    expert_sum += w.sum().item()  # w is a 2D or 3D tensor, so .sum() is the sum of all elements.
+
+                # Then compare with the original weight's sum:
+                original_sum = original_ffn_weight.sum().item()
+
+                sum_diff = abs(expert_sum - original_sum)
+                if sum_diff < 1e-4:  # pick a threshold that’s good for your scale
+                    print(f"Block {i} fc{jk}: The sum of all experts' weights ~ the sum of original FFN weights. sum_diff={sum_diff:.5f}")
+                else:
+                    print(f"Block {i} fc{jk}: The sum of experts' weights != original. sum_diff={sum_diff:.5f}")
+                    unchanged = False
+
+                # 2) Optionally, do more advanced checks (like L2 norm or a direct reorder).
+                #    e.g., check L2 norm if you prefer:
+                #    expert_l2, orig_l2 = 0.0, torch.norm(original_ffn_weight).item()
+                #    for w in expert_weights[jk - 1]:
+                #        expert_l2 += w.pow(2).sum().item()
+                #    expert_l2 = math.sqrt(expert_l2)
+                #    diff_l2 = abs(expert_l2 - orig_l2)
+                #    # etc.
+
+
+                    # set args
+
+    for tau in args.dsti_tau_to_eval:
+        seed = 0 #@param {type:"number"}
+        torch.manual_seed(seed)
+        num_sampling_steps = 250 #@param {type:"slider", min:0, max:1000, step:1}
+        cfg = 4 #@param {type:"slider", min:1, max:10, step:0.1}
+        more_smooth = False # True for more smooth output
+        class_labels = (0,) 
+
+        # seed
+        torch.manual_seed(seed)
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+        # run faster
+        tf32 = True
+        torch.backends.cudnn.allow_tf32 = bool(tf32)
+        torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
+        torch.set_float32_matmul_precision('high' if tf32 else 'highest')
+
+        #tc.initial_model.rng.manual_seed(seed)
+        tc.model.rng.manual_seed(seed)
+        rng = tc.model.rng
+
+        B = len(class_labels)
+        label_B: torch.LongTensor = torch.tensor(class_labels, device=args.device)
+
+        
+        with torch.inference_mode():
+            with torch.autocast('cuda', enabled=True, dtype=torch.float32, cache_enabled=True):    # using bfloat16 can be faster
+                type_of_model= "MoE_FT" if include_sparsity else "MoE_no_FT"
+                autoregressive_infer_cfg_with_expert_plot(tc=tc, B=B, label_B=label_B, cfg=cfg, top_k=900, top_p=0.95, rng=rng, more_smooth=more_smooth, tau=tau, debug_data=debug_data, type_of_model=type_of_model)
+
+    asdasdas
 
 
 def set_for_train_iteration(tc):
@@ -183,7 +326,6 @@ def in_training_eval(args, tc, first_time=False):
                     with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):    # using bfloat16 can be faster
                         autoregressive_infer_cfg_with_expert_plot(tc=tc, cfg=cfg, top_k=900, top_p=0.95, g_seed=seed, more_smooth=more_smooth, tau=tau)
 
-        asdadsasd
 
 def training_loop(args, tc):
     if tc.accelerator.is_main_process:
@@ -457,11 +599,10 @@ def train(args):
     setup_accelerator(args, tc)
     setup_files_and_logging(args, tc)
     setup_model(args, tc)
-    setup_for_training(args, tc)
-    setup_data(args, tc)
-    setup_optimization(args, tc)
-    setup_state(tc)
-    make_vae(args, tc)
+    #setup_for_training(args, tc)
+    #setup_data(args, tc)
+    #setup_optimization(args, tc)
+    #setup_state(tc)
 
     tc.trainer = VARTrainer(
         device=args.device, # correct
@@ -486,102 +627,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-
-
-
-
-# def final_eval(args, tc):
-#     if not tc.final_path.exists():
-#         if tc.accelerator.is_main_process:
-#             save_state(tc.accelerator, tc.state_path)
-#         if hasattr(tc, 'hook_handles'):
-#             remove_hooks(tc.hook_handles)
-#         set_for_eval_with_topk(tc, 1)
-#         unwrapped_model = tc.accelerator.unwrap_model(tc.model)
-#         del tc.optimizer
-#         #cost_without_experts, token_expert_costs, model_params = benchmark_moe(unwrapped_model, tc.test_loader)
-#         final_scores = []
-#         final_losses = []
-#         final_flops = []
-#         final_expert_average_costs = []
-#         final_expert_utilization = []
-#         final_total_experts = []
-#         if args.dsti_tau_to_eval is None and args.k_to_eval is None:
-#             raise ValueError('Must specify either dsti_tau_to_eval or dsti_k_to_eval')
-#         if args.dsti_tau_to_eval is not None and args.k_to_eval is not None:
-#             raise ValueError('Must specify either dsti_tau_to_eval or dsti_k_to_eval, not both')
-#         if args.dsti_tau_to_eval is not None:
-#             for tau in args.dsti_tau_to_eval:
-#                 if tc.accelerator.is_main_process:
-#                     logging.info(f'Testing on testset for tau={tau}.')
-#                 set_for_eval_with_dynk(tc, tau, args.dsti_expert_selection_mode)
-#                 test_loss, test_acc, total_average_flops, expert_average_costs, executed_expert_tokens, total_expert_tokens = online_evaluate_moe(
-#                     tc.accelerator,
-#                     tc.model,
-#                     tc.test_loader,
-#                     tc.criterion_type,
-#                     cost_without_experts,
-#                     token_expert_costs,
-#                     batches=args.test_batches,
-#                     return_counts=True)
-#                 if tc.accelerator.is_main_process:
-#                     final_losses.append(test_loss)
-#                     final_scores.append(test_acc)
-#                     # benchmark model efficiency
-#                     final_flops.append(total_average_flops)
-#                     final_expert_average_costs.append(expert_average_costs)
-#                     final_expert_utilization.append(executed_expert_tokens)
-#                     final_total_experts.append(total_expert_tokens)
-#                     # log
-#                     tc.writer.add_scalar(f'Eval with tau={tau}/Test loss', test_loss,
-#                                          global_step=tc.state.current_batch)
-#                     tc.writer.add_scalar(f'Eval with tau={tau}/Test accuracy', test_acc,
-#                                          global_step=tc.state.current_batch)
-#                     tc.writer.add_scalar(f'Eval with tau={tau}/Model FLOPs', total_average_flops,
-#                                          global_step=tc.state.current_batch)
-#         if args.k_to_eval is not None:
-#             for k_to_use in args.k_to_eval:
-#                 if tc.accelerator.is_main_process:
-#                     logging.info(f'Testing on testset for k={k_to_use}.')
-#                 set_for_eval_with_topk(tc, k_to_use)
-#                 test_loss, test_acc, total_average_flops, expert_average_costs, executed_expert_tokens, total_expert_tokens = online_evaluate_moe(
-#                     tc.accelerator,
-#                     tc.model,
-#                     tc.test_loader,
-#                     tc.criterion_type,
-#                     cost_without_experts,
-#                     token_expert_costs,
-#                     batches=args.test_batches,
-#                     return_counts=True)
-#                 if tc.accelerator.is_main_process:
-#                     final_losses.append(test_loss)
-#                     final_scores.append(test_acc)
-#                     # benchmark model efficiency
-#                     final_flops.append(total_average_flops)
-#                     final_expert_average_costs.append(expert_average_costs)
-#                     final_expert_utilization.append(executed_expert_tokens)
-#                     final_total_experts.append(total_expert_tokens)
-#                     # log
-#                     tc.writer.add_scalar(f'Eval with k={k_to_use}/Test loss', test_loss,
-#                                          global_step=tc.state.current_batch)
-#                     tc.writer.add_scalar(f'Eval with k={k_to_use}/Test accuracy', test_acc,
-#                                          global_step=tc.state.current_batch)
-#                     tc.writer.add_scalar(f'Eval with k={k_to_use}/Model FLOPs', total_average_flops,
-#                                          global_step=tc.state.current_batch)
-#         if tc.accelerator.is_main_process:
-#             tc.writer.add_scalar('Eval/Model Params', model_params[''], global_step=tc.state.current_batch)
-#             final_results = {}
-#             final_results['args'] = args
-#             final_results['model_state'] = unwrapped_model.state_dict()
-#             final_results['test_losses'] = final_losses
-#             final_results['hyperparam_values'] = args.dsti_tau_to_eval or args.k_to_eval
-#             final_results['final_scores'] = final_scores
-#             final_results['final_flops'] = final_flops
-#             final_results['model_params'] = dict(model_params)
-#             final_results['expert_average_costs'] = final_expert_average_costs
-#             final_results['expert_utilization'] = final_expert_utilization
-#             final_results['total_experts_used'] = final_total_experts
-#             save_final(args, tc.final_path, final_results)

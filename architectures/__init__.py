@@ -15,16 +15,11 @@ def build_vae_var(
     # VAR args
     num_classes=1000, depth=16, shared_aln=False, attn_l2_norm=True,
     flash_if_available=True, fused_if_available=True,
-    init_adaln=0.5, init_adaln_gamma=1e-5, init_head=0.02, init_std=-1, only_vae=False    # init_std < 0: automated
+    init_adaln=0.5, init_adaln_gamma=1e-5, init_head=0.02, init_std=-1,    # init_std < 0: automated
 ) -> Tuple[VQVAE, VAR]:
     heads = depth
     width = depth * 64
     dpr = 0.1 * depth/24
-
-    if only_vae:
-        # build only VQVAE
-        vae_local = VQVAE(vocab_size=V, z_channels=Cvae, ch=ch, test_mode=True, share_quant_resi=share_quant_resi, v_patch_nums=patch_nums).to(device)
-        return vae_local, None
     
     # disable built-in initialization for speed
     for clz in (nn.Linear, nn.LayerNorm, nn.BatchNorm2d, nn.SyncBatchNorm, nn.Conv1d, nn.Conv2d, nn.ConvTranspose1d, nn.ConvTranspose2d):
@@ -32,8 +27,6 @@ def build_vae_var(
     
     # build models
     vae_local = VQVAE(vocab_size=V, z_channels=Cvae, ch=ch, test_mode=True, share_quant_resi=share_quant_resi, v_patch_nums=patch_nums).to(device)
-    vae_ckpt = 'vae_ch160v4096z32.pth'
-    vae_local.load_state_dict(torch.load(vae_ckpt, map_location='cuda'), strict=True)
     var_wo_ddp = VAR(
         vae_local=vae_local,
         num_classes=num_classes, depth=depth, embed_dim=width, num_heads=heads, drop_rate=0., attn_drop_rate=0., drop_path_rate=dpr,

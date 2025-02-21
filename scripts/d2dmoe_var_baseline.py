@@ -49,12 +49,12 @@ def main():
     qos = None
 
     # partition = 'plgrid-gpu-a100'
-    partition = 'gpu_h100'
+    partition = 'gpu'
     # partition = 'dgx'
     # partition = 'rtx3080'
     # partition = 'batch'
 
-    timeout = 60 #60 * 24 * 7
+    timeout = 10 #60 * 24 * 7
     # timeout = 60 * 24 * 2
 
     gpus_per_task = 1
@@ -174,19 +174,19 @@ def main():
     # dsti_routing_args.model_args.output_activation = 'identity'
     dsti_routing_args.dsti_router_labels_layer = 'output'
     dsti_routing_args.dsti_router_labels_norm = 2
-    dsti_routing_args.dsti_tau_to_eval =  [0.5, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.925, 0.95,
-                                           0.96, 0.97, 0.98, 0.99, 0.995, 0.999, 0.9999, 1.0]
-
-                                           
+    dsti_routing_args.dsti_tau_to_eval = [0.9305, 0.9310, 0.9315, 0.9320]
     #[0.5, 0.8, 1.0]
-    
+    # [0.9, 0.925, 0.93, 0.935, 0.94, 0.945,0.95,
+    #                                       0.96, 0.97, 0.98, 0.99, 0.995, 0.999, 0.9999, 1.0]
+                                           
     # [0.5, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.925, 0.95,
     #                                       0.96, 0.97, 0.98, 0.99, 0.995, 0.999, 0.9999, 1.0]
+    
     dsti_routing_args.dsti_expert_selection_mode = 'dynk_max'
     dsti_routing_args.eval_points = 4
     # dsti_routing_args.eval_points = 0
-    # dsti_routing_args.mixed_precision = None
-    dsti_routing_args.mixed_precision = 'bf16'
+    dsti_routing_args.mixed_precision = None
+    #dsti_routing_args.mixed_precision = 'bf16'
 
     # # ════════════════════════ dsti router training ════════════════════════ #
     # Jort HEre

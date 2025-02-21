@@ -8,6 +8,14 @@ from architectures import build_vae_var
 import os 
 import dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+import os
+import os.path as osp
+import torch, torchvision
+import random
+import numpy as np
+import PIL.Image as PImage, PIL.ImageDraw as PImageDraw
+from architectures.vqvae import VQVAE
+
 
 
 def get_efficientnet_b0():
@@ -166,34 +174,63 @@ def get_swin_t():
     model.number_of_classes = 1000
     return model
 
+# def get_var_d16():
+#     model_ckpt = f'var_d16.pth'
+#     if not os.path.exists(model_ckpt):
+#         os.system(f'wget https://huggingface.co/FoundationVision/var/resolve/main/{model_ckpt}')
+    
+#     # Params
+#     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+#     patch_nums = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
+#     # var_ckpt = f'var_d16.pth'
+
+#     # build models    
+#     _, model = build_vae_var(
+#         V=4096, Cvae=32, ch=160, share_quant_resi=4,    # hard-coded VQVAE hyperparameters
+#         device=device, patch_nums=patch_nums,
+#         num_classes=1000, depth=16, shared_aln=False,
+#     )
+
+#     model.num_classes = 1000
+#     model.input_size = 256
+#     model.input_channels = 3
+#     #model.forward_generator = partial(forward_generator, model)
+
+#     model.load_state_dict(torch.load(model_ckpt, map_location=device), strict=True)
+#     var_wo_ddp: VAR = compile_model(model, 0)
+#     var: DDP = (DDP if dist.initialized() else NullDDP)(var_wo_ddp, device_ids=[dist.get_local_rank()], find_unused_parameters=False, broadcast_buffers=False)
+    
+
+#     return var, var_wo_ddp
+
 def get_var_d16():
-    model_ckpt = f'var_d16.pth'
-    if not os.path.exists(model_ckpt):
-        os.system(f'wget https://huggingface.co/FoundationVision/var/resolve/main/{model_ckpt}')
-    
-    # Params
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    ################## 1. Download checkpoints and build models
+    setattr(torch.nn.Linear, 'reset_parameters', lambda self: None)     # disable default parameter init for faster speed
+    setattr(torch.nn.LayerNorm, 'reset_parameters', lambda self: None)  # disable default parameter init for faster speed
+    MODEL_DEPTH = 16
+    # download checkpoint
+    hf_home = 'https://huggingface.co/FoundationVision/var/resolve/main'
+    vae_ckpt, var_ckpt = 'vae_ch160v4096z32.pth', f'var_d{MODEL_DEPTH}.pth'
+    if not osp.exists(vae_ckpt): os.system(f'wget {hf_home}/{vae_ckpt}')
+    if not osp.exists(var_ckpt): os.system(f'wget {hf_home}/{var_ckpt}')
+
+    # build vae, var
     patch_nums = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
-    # var_ckpt = f'var_d16.pth'
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if 'vae' not in globals() or 'var' not in globals():
+        vae, var = build_vae_var(
+            V=4096, Cvae=32, ch=160, share_quant_resi=4,    # hard-coded VQVAE hyperparameters
+            device=device, patch_nums=patch_nums,
+            num_classes=1000, depth=MODEL_DEPTH, shared_aln=False,
+        )
 
-    # build models    
-    _, model = build_vae_var(
-        V=4096, Cvae=32, ch=160, share_quant_resi=4,    # hard-coded VQVAE hyperparameters
-        device=device, patch_nums=patch_nums,
-        num_classes=1000, depth=16, shared_aln=False,
-    )
-
-    model.num_classes = 1000
-    model.input_size = 256
-    model.input_channels = 3
-    #model.forward_generator = partial(forward_generator, model)
-
-    model.load_state_dict(torch.load(model_ckpt, map_location=device), strict=True)
-    var_wo_ddp: VAR = compile_model(model, 0)
-    var: DDP = (DDP if dist.initialized() else NullDDP)(var_wo_ddp, device_ids=[dist.get_local_rank()], find_unused_parameters=False, broadcast_buffers=False)
-    
-
-    return var, var_wo_ddp
+    # load checkpoints
+    vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True)
+    var.load_state_dict(torch.load(var_ckpt, map_location='cpu'), strict=True)
+    vae.eval(), var.eval()
+    for p in vae.parameters(): p.requires_grad_(False)
+    for p in var.parameters(): p.requires_grad_(False)
+    return var, vae
 
 def compile_model(m, fast):
     if fast == 0:
