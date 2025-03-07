@@ -54,6 +54,7 @@ class MoeficationMoE(MoELayer):
         self.k = None
         self.tau = None
         self.add_residual_connection = add_residual_connection
+        self.routing_mask = None
 
     def gate(self, x):
         # x is of size (batch_size, sequence_length, dim)
@@ -87,8 +88,41 @@ class MoeficationMoE(MoELayer):
             norm_thresholds = max_norms * (1.0 - self.tau)
             routing_tensor = torch.zeros_like(predicted_expert_norms)
             routing_tensor[predicted_expert_norms >= norm_thresholds] = 1.0
+        elif self.forward_mode == 'oracle':            
+            # Save original shape (ideally [2, 1, 1024])
+            orig_size = x.size()  
+            # x is currently [2, 1024]. If you intended [2,1,1024], make sure x has that shape.
+            #print('x oracle', x.shape)  # Expected: [2, 1024] if orig_size was [2,1024]
+            x = x.view(-1, x.size(-1))
+            assert x.dim() == 2, f'{x.size()=}'
+            x = x.unsqueeze(0)
+
+            for i, layer in enumerate(self.experts.layers):
+                x = layer(x)
+        
+            # Suppose B = input.size(0), T = input.size(1)
+            e = x.size(0)
+            B = orig_size[0]
+            T = orig_size[1]
+
+            norms = torch.linalg.vector_norm(x, ord=2, dim=-1)
+            max_norms = norms.view(e, B, T).permute(1, 2, 0)  # => shape (B, T, e)
+            max_norms, _ = norms.max(dim=-1, keepdim=True)
+            norm_thresholds = max_norms * (1.0 - self.tau)
+            new_routing = torch.zeros_like(norms)
+            new_routing[norms >= norm_thresholds] = 1.0
+            new_routing = new_routing.transpose(0, 1) 
+            routing_tensor = new_routing
+            self.routing_mask = new_routing.sum(dim=-1)
         else:
             raise ValueError(f'Unsupported forward_mode: {self.forward_mode}')
+
+        # print('routing_tensor', routing_tensor.shape)
+        # print('predicted_expert_norms', predicted_expert_norms.shape)
+        # print('predicted_expert_norms[0]', predicted_expert_norms[0])
+        # print('max_norms', max_norms.shape)
+        # print('max_norms[0]', max_norms[0])
+        # print('routing_tensor', routing_tensor.shape)
         return routing_tensor
 
     def forward(self, x):
@@ -100,15 +134,17 @@ class MoeficationMoE(MoELayer):
         
         orig_size = x.size()
         x = x.view(-1, x.size(-1))
+        #print('x', x.shape)
+        #print(' routing_tensor.view(-1, routing_tensor.size(-1)',  routing_tensor.view(-1, routing_tensor.size(-1)).shape)
         out = self.experts(x, routing_tensor.view(-1, routing_tensor.size(-1)))
+        #print('out true experts', out.shape)
 
         if self.bias:
             out = out + self.last_bias
         if self.add_residual_connection:
             out = out + x
         out = out.view(orig_size)
-        #torch.set_printoptions(threshold=100, edgeitems=10)
-        #print("MoE output:", out, out.dtype, x.dtype)
+        #print('final out', out.shape)
         return out, {self.name: (routing_tensor,)}
 
 

@@ -49,12 +49,12 @@ def main():
     qos = None
 
     # partition = 'plgrid-gpu-a100'
-    partition = 'gpu'
+    partition = 'gpu_h100'
     # partition = 'dgx'
     # partition = 'rtx3080'
     # partition = 'batch'
 
-    timeout = 10 #60 * 24 * 7
+    timeout = 60 #60 * 24 * 7
     # timeout = 60 * 24 * 2
 
     gpus_per_task = 1
@@ -129,6 +129,8 @@ def main():
     # expert_split_args.model_args.expert_size = 12
     expert_split_args.model_args.expert_size = 8 #6
     expert_split_args.model_args.experts_class = 'execute_all'
+    expert_split_args.activation = None
+    expert_split_args.final_path_save = 'base_moe'
 
     # # ════════════════════════ dsti moe split ════════════════════════ #
     base_split_exp_names = []
@@ -167,14 +169,14 @@ def main():
     # dsti_routing_args.model_args.width = 32
     # dsti_routing_args.model_args.width = 16
     # dsti_routing_args.model_args.activation = 'gelu'
-    dsti_routing_args.model_args.activation = 'relu'
+    dsti_routing_args.model_args.activation = 'gelu'
     # dsti_routing_args.model_args.activation = 'tanh'
     dsti_routing_args.model_args.output_activation = 'abs'
     # dsti_routing_args.model_args.output_activation = 'relu'
     # dsti_routing_args.model_args.output_activation = 'identity'
     dsti_routing_args.dsti_router_labels_layer = 'output'
     dsti_routing_args.dsti_router_labels_norm = 2
-    dsti_routing_args.dsti_tau_to_eval = [0.9305, 0.9310, 0.9315, 0.9320]
+    dsti_routing_args.dsti_tau_to_eval = [1.0]#[0.9, 0.925, 0.93, 0.935, 0.94, 0.945,0.95, 0.96, 0.97, 0.98, 0.99, 0.995, 0.999, 0.9999, 1.0]
     #[0.5, 0.8, 1.0]
     # [0.9, 0.925, 0.93, 0.935, 0.94, 0.945,0.95,
     #                                       0.96, 0.97, 0.98, 0.99, 0.995, 0.999, 0.9999, 1.0]
@@ -187,21 +189,68 @@ def main():
     # dsti_routing_args.eval_points = 0
     dsti_routing_args.mixed_precision = None
     #dsti_routing_args.mixed_precision = 'bf16'
+    # Include Sparsity or not
+
+    final_path_save = [
+        # 'relu_data_0',
+        # 'relu_data_0.01',
+        # 'relu_data_0.0001',
+        # 'relu_data_0.2',
+
+        # 'gelu_data_0.2',
+
+        'base_data_moe',
+    ]
+
+    path_file_ft = [
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.01/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.0001/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.2/final.pth',
+
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/gelu_sparse_ft_0.2/final.pth',
+    ]
+
+    path_file_moe = [
+        # '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0/final.pth',
+        # '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.01/final.pth',
+        # '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.0001/final.pth',
+        # '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_moe_0.2/final.pth',
+
+        # '/home/jvincenti/D2DMoE/shared/results/effbench_runs/gelu_sparse_moe_0.2/final.pth',
+
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/base_moe/final.pth',
+    ]
+
 
     # # ════════════════════════ dsti router training ════════════════════════ #
     # Jort HEre
     base_routed_dsti_exp_names = []
     for base_on_exp_name in base_split_exp_names:
         for exp_id in exp_ids:
-            args = deepcopy(dsti_routing_args)
-            args.exp_id = exp_id
-            args.base_on = base_on_exp_name
-            exp_name, run_name = generate_run_name(args)
-            base_run_name = f'{base_on_exp_name}_{exp_id}'
-            executor.update_parameters(slurm_additional_parameters={})
-            job = submit_job(executor, dsti_train_routers, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
-            jobs.append(job)
-            run_to_job_map[run_name] = job
+            for i in range(len(final_path_save)):
+
+                dsti_routing_args.path_file_moe = path_file_moe[i]
+                dsti_routing_args.final_path_save = final_path_save[i]
+
+                if dsti_routing_args.final_path_save == 'base_data_moe':
+                    dsti_routing_args.activation = None
+                elif 'relu' in dsti_routing_args.final_path_save:
+                    dsti_routing_args.activation = 'relu'
+                    dsti_routing_args.path_file_ft = path_file_ft[i]
+                else:
+                    dsti_routing_args.activation = 'gelu'
+                    dsti_routing_args.path_file_ft = path_file_ft[i]
+
+                args = deepcopy(dsti_routing_args)
+                args.exp_id = exp_id
+                args.base_on = base_on_exp_name
+                exp_name, run_name = generate_run_name(args)
+                base_run_name = f'{base_on_exp_name}_{exp_id}'
+                executor.update_parameters(slurm_additional_parameters={})
+                job = submit_job(executor, dsti_train_routers, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
+                jobs.append(job)
+                run_to_job_map[run_name] = job
         exp_names.append(exp_name)
         base_routed_dsti_exp_names.append(exp_names[-1])
         display_names.append(f'DSTI')

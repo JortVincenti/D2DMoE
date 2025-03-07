@@ -13,30 +13,30 @@ the 'module load <package__name>' command. If you are uncertain if a package is
 already available 
 on the system, please use 'module avail' or 'module spider' to search for it.
 ============================================================================================== 
-rm: refusing to remove '.' or '..' directory: skipping 'shared/results/effbench_logs/.'
-rm: refusing to remove '.' or '..' directory: skipping 'shared/results/effbench_logs/..'
 [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
-[02-21 21:51:20] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
-[02-21 21:51:20] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
-[02-21 21:51:20] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
-[02-21 21:51:20] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
-[02-21 21:51:20] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
-[02-21 21:51:20] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
-[02-21 21:51:20] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
-[02-21 21:51:21] (s/d2dmoe_var_baseline.py, line 211)=> Exp names: ['TINYIMAGENET_PATH_dsti_expert_split_CH46ZREW', 'TINYIMAGENET_PATH_dsti_router_L6NOMXDQ']
-[02-21 21:51:21] (s/d2dmoe_var_baseline.py, line 212)=> Display names: ['DSTI expert split', 'DSTI']
-[02-21 21:51:21] (s/d2dmoe_var_baseline.py, line 213)=> SLURM JIDs: ['10110505']
+[03-07 22:47:19] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
+[03-07 22:47:19] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
+[03-07 22:47:19] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[03-07 22:47:19] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[03-07 22:47:19] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[03-07 22:47:19] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[03-07 22:47:19] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[03-07 22:47:19] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[03-07 22:47:19] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[03-07 22:47:19] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[03-07 22:47:19] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
 
 JOB STATISTICS
 ==============
-Job ID: 10110501
+Job ID: 10362484
 Cluster: snellius
 User/Group: jvincenti/jvincenti
-State: COMPLETED (exit code 0)
+State: RUNNING
 Nodes: 1
 Cores per node: 18
-CPU Utilized: 00:00:10
-CPU Efficiency: 1.85% of 00:09:00 core-walltime
-Job Wall-clock time: 00:00:30
-Memory Utilized: 2.23 MB
-Memory Efficiency: 0.00% of 120.00 GB
+CPU Utilized: 00:00:00
+CPU Efficiency: 0.00% of 00:07:12 core-walltime
+Job Wall-clock time: 00:00:24
+Memory Utilized: 0.00 MB (estimated maximum)
+Memory Efficiency: 0.00% of 120.00 GB (120.00 GB/node)
+WARNING: Efficiency statistics may be misleading for RUNNING jobs.

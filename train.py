@@ -285,6 +285,11 @@ def setup_model(args, tc): # Jort: This should be correct!
     tc.model = tc.accelerator.prepare(model)
     tc.model.train()
 
+def get_different_generator_for_each_rank() -> Optional[torch.Generator]:   # for random augmentation
+    g = torch.Generator()
+    g.manual_seed(0 * dist.get_world_size() + dist.get_rank())
+    return g
+
 def setup_data(args, tc): # Jort: This should be correct!
 
     batch_size = args.batch_size
@@ -298,35 +303,33 @@ def setup_data(args, tc): # Jort: This should be correct!
     num_classes, train_dataset, val_dataset = build_dataset(args.data_path, args.data_load_reso, args.hflip, args.mid_reso)
     types = str((type(train_dataset).__name__, type(val_dataset).__name__))
 
-    tc.val_loader = tc.accelerator.prepare(DataLoader(
+    tc.val_loader = DataLoader(
         val_dataset, num_workers=0, pin_memory=True,
         batch_size=round(args.batch_size*1.5), sampler=EvalDistributedSampler(val_dataset, num_replicas=dist.get_world_size(), rank=dist.get_rank()),
         shuffle=False, drop_last=False,
-    ))
-    tc.test_loader = tc.val_loader # Jort: For now keep it like this.
+    )
     del val_dataset
 
     _, start_ep, start_it, _, _ = auto_resume(args, 'ar-ckpt*.pth')
     
-    tc.train_loader  =  tc.accelerator.prepare(DataLoader(
+    tc.train_loader  = DataLoader(
         dataset=train_dataset, num_workers=args.workers, pin_memory=True,
-        generator=None, # Jort, For now keep it none original: get_different_generator_for_each_rank(args), # worker_init_fn=worker_init_fn,
+        generator= get_different_generator_for_each_rank(),
         batch_sampler=DistInfiniteBatchSampler(
             dataset_len=len(train_dataset), glb_batch_size=args.glb_batch_size, same_seed_for_all_ranks=args.same_seed_for_all_ranks,
             shuffle=True, fill_last=True, rank=dist.get_rank(), world_size=dist.get_world_size(), start_ep=start_ep, start_it=start_it,
         ),
-    ))
+    )
     del train_dataset
 
     if args.last_batch is None:
         batches_per_epoch = len(tc.train_loader)
         tc.last_batch = math.ceil(args.epochs * batches_per_epoch - 1)
-        if tc.accelerator.is_main_process:
-            logging.info(f'{args.epochs=} {batches_per_epoch=} {tc.last_batch=}')
+        logging.info(f'{args.epochs=} {batches_per_epoch=} {tc.last_batch=}')
     else:
         tc.last_batch = args.last_batch
-        if tc.accelerator.is_main_process:
-            logging.info(f'{tc.last_batch=}')
+        
+        logging.info(f'{tc.last_batch=}')
     tc.eval_batch_list = [
         round(x) for x in torch.linspace(0, tc.last_batch, steps=args.eval_points, device='cuda').tolist()
     ]
@@ -356,48 +359,11 @@ def setup_optimization(args, tc): # Jort: This should be roughly correct (tc.opt
     }[args.opt.lower().strip()]
     opt_kw = dict(lr=args.tlr, weight_decay=0)
 
-    criterion_args = args.loss_args
-    tc.criterion_type = LOSS_NAME_MAP[args.loss_type]
-    tc.criterion = tc.criterion_type(reduction='mean', **criterion_args)
-    optimizer_args = args.optimizer_args
-
-    if 'selective_weight_decay' in optimizer_args and optimizer_args['selective_weight_decay']:
-        param_dict = {pn: p for pn, p in tc.model.named_parameters() if p.requires_grad}
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-        params = [
-            {'params': decay_params, 'weight_decay': optimizer_args.weight_decay},
-            {'params': nodecay_params, 'weight_decay': 0.0}
-        ]
-        del optimizer_args['weight_decay']
-        del optimizer_args['selective_weight_decay']
-    else:
-        params = unfrozen_parameters(tc.model)
-
-    tc.optimizer = tc.accelerator.prepare(AmpOptimizer(
+    tc.optimizer = AmpOptimizer(
         mixed_precision=args.fp16, optimizer=opt_clz(params=para_groups, **opt_kw), names=names, paras=paras,
         grad_clip=args.tclip, n_gradient_accumulation=args.ac
-    )) # Jort: Originaly this should be wrapped into tc.accelerator.prepare() but this is not possible with AmpOptimizer
+    ) # Jort: Originaly this should be wrapped into tc.accelerator.prepare() but this is not possible with AmpOptimizer
     del names, paras, para_groups
-
-    if args.scheduler_class is not None:
-        scheduler_args = deepcopy(args.scheduler_args)
-        if 'patience' in scheduler_args:
-            scheduler_args['patience'] = int(scheduler_args['patience'] * tc.last_batch)
-        if args.scheduler_class == 'cosine':
-            scheduler_args['T_max'] = tc.last_batch
-        if args.scheduler_class in ['cosine_with_warmup', 'linear', 'inverse_sqrt']:
-            scheduler_args['num_training_steps'] = tc.last_batch
-        tc.scheduler = tc.accelerator.prepare(SCHEDULER_NAME_MAP[args.scheduler_class](tc.optimizer, **scheduler_args)) #Jort this should be wrapped into tc.accelerator.prepare() but this is not possible with SCHEDULER_NAME_MAP
-
-    if args.distill_from is not None:
-        teacher_model, _, _ = load_model(args, args.distill_from, args.exp_id)
-        tc.teacher_model = tc.accelerator.prepare(teacher_model)
-        tc.teacher_model.eval()
-        tc.distill_weight = 1.0 if args.distill_weight is None else args.distill_weight
-        # TODO optionally parameterize the type of loss
-        tc.distill_criterion = torch.nn.KLDivLoss(log_target=True, reduction='batchmean')
-
 
 def training_loop(args, tc):
     """Execute the main training loop."""
@@ -419,52 +385,33 @@ def setup_files_and_logging(args, tc): # Jort: This should be correct!
     tc.state_path = run_dir / 'state'
     tc.final_path = run_dir / 'final.pth'
     # logging setup
-    if tc.accelerator.is_main_process:
+    #if tc.accelerator.is_main_process:
         # log config
-        logging.info(f'{run_name} args:\n{args}')
-        if args.use_wandb:
-            entity = os.environ['WANDB_ENTITY']
-            project = os.environ['WANDB_PROJECT']
-            run_id = get_run_id(run_name)
-            wandb.tensorboard.patch(root_logdir=str(run_dir.resolve()), pytorch=True, save=False)
-            if run_id is not None:
-                wandb.init(entity=entity, project=project, id=run_id, resume='must', dir=str(run_dir.resolve()))
-            else:
-                wandb.init(entity=entity, project=project, config=dict(args), name=run_name,
-                           dir=str(run_dir.resolve()))
-            wandb.run.log_code('.', include_fn=lambda path: path.endswith('.py'))
-        tc.writer = SummaryWriter(str(run_dir.resolve()))
+    logging.info(f'{run_name} args:\n{args}')
+    if args.use_wandb:
+        entity = os.environ['WANDB_ENTITY']
+        project = os.environ['WANDB_PROJECT']
+        run_id = get_run_id(run_name)
+        wandb.tensorboard.patch(root_logdir=str(run_dir.resolve()), pytorch=True, save=False)
+        if run_id is not None:
+            wandb.init(entity=entity, project=project, id=run_id, resume='must', dir=str(run_dir.resolve()))
+        else:
+            wandb.init(entity=entity, project=project, config=dict(args), name=run_name,
+                        dir=str(run_dir.resolve()))
+        wandb.run.log_code('.', include_fn=lambda path: path.endswith('.py'))
+    tc.writer = SummaryWriter(str(run_dir.resolve()))
 
 
 def in_training_eval(args, tc):
-
     """Perform evaluation during training at specific intervals."""
     if tc.state.current_batch in tc.eval_batch_list:
-        if tc.accelerator.is_main_process:
-            tc.writer.add_scalar('Train/Progress',
-                                 tc.state.current_batch / tc.last_batch,
-                                 global_step=tc.state.current_batch)
         test_loss, test_acc = test_classification(tc.accelerator,
                                                   tc.model,
                                                   tc.test_loader,
                                                   tc.criterion_type,
                                                   tc, 
                                                   batches=args.eval_batches)
-        if tc.accelerator.is_main_process and hasattr(tc, 'sparsity'):
-            tc.writer.add_scalar('Eval/Test sparsity', tc.sparsity, global_step=tc.state.current_batch)
-        # train_loss, train_acc = test_classification(tc.accelerator,
-        #                                             tc.model,
-        #                                             tc.train_eval_loader,
-        #                                             tc.criterion_type,
-        #                                             tc,
-        #                                             batches=args.eval_batches)
-        # if tc.accelerator.is_main_process and hasattr(tc, 'sparsity'):
-        #     tc.writer.add_scalar('Eval/Train sparsity', tc.sparsity, global_step=tc.state.current_batch)
-        if tc.accelerator.is_main_process:
-            tc.writer.add_scalar('Eval/Test loss', test_loss, global_step=tc.state.current_batch)
-            tc.writer.add_scalar('Eval/Test accuracy', test_acc, global_step=tc.state.current_batch)
-            # tc.writer.add_scalar('Eval/Train loss', train_loss, global_step=tc.state.current_batch)
-            # tc.writer.add_scalar('Eval/Train accuracy', train_acc, global_step=tc.state.current_batch)
+        print('test_loss:', test_loss, 'test_acc:', test_acc)
 
 def setup_state(tc):
     tc.state = TrainingState()
@@ -481,8 +428,7 @@ def final_eval(args, tc):
 
     final_results = {}
     final_results['args'] = args
-    unwrapped_model = tc.accelerator.unwrap_model(tc.model)
-    final_results['model_state'] = unwrapped_model.state_dict()
+    final_results['model_state'] = tc.model.state_dict()
     tc.writer.add_scalar('Eval/Test loss', L_mean)
     tc.writer.add_scalar('Eval/Test accuracy', acc_mean)
     final_results['final_score'] = acc_mean
@@ -580,3 +526,134 @@ if __name__ == '__main__':
         dist.finalize()
         if isinstance(sys.stdout, misc.SyncPrint) and isinstance(sys.stderr, misc.SyncPrint):
             sys.stdout.close(), sys.stderr.close()
+
+
+
+
+# def setup_optimization(args, tc): # Jort: This should be roughly correct (tc.optimizer, tc.scheduler)!
+#     """Set up the optimizer and learning rate scheduler."""
+
+
+#     # Create a full list of parameter names from the model
+#     # all_params = set([name for name, _ in tc.model.named_parameters()])
+
+#     # # Compute the parameters to freeze by subtracting the ones to unfreeze
+#     # params_to_freeze = all_params - params_to_unfreeze
+#     # names, paras, para_groups = filter_params(tc.model, nowd_keys=params_to_freeze)
+
+#     names, paras, para_groups = filter_params(tc.model, nowd_keys={
+#         'cls_token', 'start_token', 'task_token', 'cfg_uncond',
+#         'pos_embed', 'pos_1LC', 'pos_start', 'start_pos', 'lvl_embed',
+#         'gamma', 'beta',
+#         'ada_gss', 'moe_bias',
+#         'scale_mul',
+#     })
+
+#     opt_clz = {
+#         'adam':  partial(torch.optim.AdamW, betas=(0.9, 0.95), fused=args.afuse),
+#         'adamw': partial(torch.optim.AdamW, betas=(0.9, 0.95), fused=args.afuse),
+#     }[args.opt.lower().strip()]
+#     opt_kw = dict(lr=args.tlr, weight_decay=0)
+
+#     criterion_args = args.loss_args
+#     tc.criterion_type = LOSS_NAME_MAP[args.loss_type]
+#     tc.criterion = tc.criterion_type(reduction='mean', **criterion_args)
+#     optimizer_args = args.optimizer_args
+
+#     if 'selective_weight_decay' in optimizer_args and optimizer_args['selective_weight_decay']:
+#         param_dict = {pn: p for pn, p in tc.model.named_parameters() if p.requires_grad}
+#         decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+#         nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+#         params = [
+#             {'params': decay_params, 'weight_decay': optimizer_args.weight_decay},
+#             {'params': nodecay_params, 'weight_decay': 0.0}
+#         ]
+#         del optimizer_args['weight_decay']
+#         del optimizer_args['selective_weight_decay']
+#     else:
+#         params = unfrozen_parameters(tc.model)
+
+#     tc.optimizer = tc.accelerator.prepare(AmpOptimizer(
+#         mixed_precision=args.fp16, optimizer=opt_clz(params=para_groups, **opt_kw), names=names, paras=paras,
+#         grad_clip=args.tclip, n_gradient_accumulation=args.ac
+#     )) # Jort: Originaly this should be wrapped into tc.accelerator.prepare() but this is not possible with AmpOptimizer
+#     del names, paras, para_groups
+
+#     if args.scheduler_class is not None:
+#         scheduler_args = deepcopy(args.scheduler_args)
+#         if 'patience' in scheduler_args:
+#             scheduler_args['patience'] = int(scheduler_args['patience'] * tc.last_batch)
+#         if args.scheduler_class == 'cosine':
+#             scheduler_args['T_max'] = tc.last_batch
+#         if args.scheduler_class in ['cosine_with_warmup', 'linear', 'inverse_sqrt']:
+#             scheduler_args['num_training_steps'] = tc.last_batch
+#         tc.scheduler = tc.accelerator.prepare(SCHEDULER_NAME_MAP[args.scheduler_class](tc.optimizer, **scheduler_args)) #Jort this should be wrapped into tc.accelerator.prepare() but this is not possible with SCHEDULER_NAME_MAP
+
+#     if args.distill_from is not None:
+#         teacher_model, _, _ = load_model(args, args.distill_from, args.exp_id)
+#         tc.teacher_model = tc.accelerator.prepare(teacher_model)
+#         tc.teacher_model.eval()
+#         tc.distill_weight = 1.0 if args.distill_weight is None else args.distill_weight
+#         # TODO optionally parameterize the type of loss
+#         tc.distill_criterion = torch.nn.KLDivLoss(log_target=True, reduction='batchmean')
+
+
+
+# def setup_optimization(args, tc): # Jort: This should be roughly correct (tc.optimizer, tc.scheduler)!
+#     """Set up the optimizer and learning rate scheduler."""
+
+
+#     # Create a full list of parameter names from the model
+#     # all_params = set([name for name, _ in tc.model.named_parameters()])
+
+#     # # Compute the parameters to freeze by subtracting the ones to unfreeze
+#     # params_to_freeze = all_params - params_to_unfreeze
+#     # names, paras, para_groups = filter_params(tc.model, nowd_keys=params_to_freeze)
+
+#     names, paras, para_groups = filter_params(tc.model, nowd_keys={
+#         'cls_token', 'start_token', 'task_token', 'cfg_uncond',
+#         'pos_embed', 'pos_1LC', 'pos_start', 'start_pos', 'lvl_embed',
+#         'gamma', 'beta',
+#         'ada_gss', 'moe_bias',
+#         'scale_mul',
+#     })
+
+#     opt_clz = {
+#         'adam':  partial(torch.optim.AdamW, betas=(0.9, 0.95), fused=args.afuse),
+#         'adamw': partial(torch.optim.AdamW, betas=(0.9, 0.95), fused=args.afuse),
+#     }[args.opt.lower().strip()]
+#     opt_kw = dict(lr=args.tlr, weight_decay=0)
+
+#     criterion_args = args.loss_args
+#     tc.criterion_type = LOSS_NAME_MAP[args.loss_type]
+#     tc.criterion = tc.criterion_type(reduction='mean', **criterion_args)
+#     optimizer_args = args.optimizer_args
+
+#     if 'selective_weight_decay' in optimizer_args and optimizer_args['selective_weight_decay']:
+#         param_dict = {pn: p for pn, p in tc.model.named_parameters() if p.requires_grad}
+#         decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+#         nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+#         params = [
+#             {'params': decay_params, 'weight_decay': optimizer_args.weight_decay},
+#             {'params': nodecay_params, 'weight_decay': 0.0}
+#         ]
+#         del optimizer_args['weight_decay']
+#         del optimizer_args['selective_weight_decay']
+#     else:
+#         params = unfrozen_parameters(tc.model)
+
+#     tc.optimizer = AmpOptimizer(
+#         mixed_precision=args.fp16, optimizer=opt_clz(params=para_groups, **opt_kw), names=names, paras=paras,
+#         grad_clip=args.tclip, n_gradient_accumulation=args.ac
+#     ) # Jort: Originaly this should be wrapped into tc.accelerator.prepare() but this is not possible with AmpOptimizer
+#     del names, paras, para_groups
+
+#     if args.scheduler_class is not None:
+#         scheduler_args = deepcopy(args.scheduler_args)
+#         if 'patience' in scheduler_args:
+#             scheduler_args['patience'] = int(scheduler_args['patience'] * tc.last_batch)
+#         if args.scheduler_class == 'cosine':
+#             scheduler_args['T_max'] = tc.last_batch
+#         if args.scheduler_class in ['cosine_with_warmup', 'linear', 'inverse_sqrt']:
+#             scheduler_args['num_training_steps'] = tc.last_batch
+#         tc.scheduler = tc.accelerator.prepare(SCHEDULER_NAME_MAP[args.scheduler_class](tc.optimizer, **scheduler_args)) #Jort this should be wrapped into tc.accelerator.prepare() but this is not possible with SCHEDULER_NAME_MAP

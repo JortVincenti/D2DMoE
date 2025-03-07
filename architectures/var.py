@@ -220,9 +220,6 @@ class VAR(nn.Module):
         for b in self.blocks:
             b.attn.kv_caching(False)
 
-        with open(f"data/base_model.pkl", "wb") as f:
-            pickle.dump(debug_data, f)
-
         return self.vae_proxy[0].fhat_to_img(f_hat).add_(1).mul_(0.5), debug_data
 
     

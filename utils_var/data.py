@@ -1,5 +1,5 @@
 import os.path as osp
-
+import os 
 import PIL.Image as PImage
 from torchvision.datasets.folder import DatasetFolder, IMG_EXTENSIONS
 from torchvision.transforms import InterpolationMode, transforms
@@ -26,10 +26,9 @@ def build_dataset(
     ]
     if hflip: train_aug.insert(0, transforms.RandomHorizontalFlip())
     train_aug, val_aug = transforms.Compose(train_aug), transforms.Compose(val_aug)
-    
     # build dataset
     train_set = DatasetFolder(root=osp.join(data_path, 'train'), loader=pil_loader, extensions=IMG_EXTENSIONS, transform=train_aug)
-    val_set = DatasetFolder(root=osp.join(data_path, 'validation'), loader=pil_loader, extensions=IMG_EXTENSIONS, transform=val_aug)
+    val_set = DatasetFolder(root=osp.join(data_path, 'val'), loader=pil_loader, extensions=IMG_EXTENSIONS, transform=val_aug)
     num_classes = 1000
     print(f'[Dataset] {len(train_set)=}, {len(val_set)=}, {num_classes=}')
     print_aug(train_aug, '[train]')

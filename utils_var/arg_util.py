@@ -26,7 +26,7 @@ import dist
 
 
 class Args(Tap):
-    data_path: str = 'shared/sets/datasets/vision/TinyImageNet'
+    data_path: str = '../../../../scratch-nvme/ml-datasets/imagenet/torchvision_ImageFolder' #'shared/sets/datasets/vision/TinyImageNet'
     exp_name: str = 'text'
     
     # VAE
@@ -112,7 +112,7 @@ class Args(Tap):
     
     tf32: bool = True       # whether to use TensorFloat32
     device: str = 'cuda' #'cpu'     # [automatically set; don't specify this]
-    seed: int = None        # seed
+    seed: int = 0       # seed
 
 
     def seed_everything(self, benchmark: bool):

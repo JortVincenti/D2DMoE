@@ -74,7 +74,7 @@ def filter_params(model, nowd_keys=()) -> Tuple[
     count, numel = 0, 0
     for name, para in model.named_parameters():
         name = name.replace('_fsdp_wrapped_module.', '')
-        if not para.requires_grad:
+        if not para.requires_grad and 'blocks' not in name and 'head' not in name:
             names_no_grad.append(name)
             continue  # frozen weights
         count += 1

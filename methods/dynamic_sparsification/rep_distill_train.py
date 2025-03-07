@@ -33,7 +33,8 @@ class ReplaceModulesTrainingContext(TrainingContext):
 
 def setup_model(args, tc):
     assert args.model_class == 'mha_rep_distill'
-    base_model, base_args, _, tc.model_var_wo_ddp = load_model(args, args.base_on, args.exp_id)
+    base_model, tc.model_vae = get_var_d16()
+    simplify_mha(base_model)
     model_args = args.model_args
     model, tc.replaced_module_names = replace_mha_projections(base_model, **model_args)
     init_fun = INIT_NAME_MAP[args.init_fun]
@@ -79,14 +80,8 @@ def training_loop(args, tc):
         model_saved = datetime.now()
     train_iter = iter(tc.train_loader)
     unwrapped_model = tc.accelerator.unwrap_model(tc.model)
-    if args.mixup_alpha is not None or args.cutmix_alpha is not None:
-        mixup_mode = 'batch' if args.mixup_mode is None else args.mixup_mode
-        mixup_smoothing = 0.1 if args.mixup_smoothing is None else args.mixup_smoothing
-        mixup_fn = Mixup(
-            mixup_alpha=args.mixup_alpha, cutmix_alpha=args.cutmix_alpha, mode=mixup_mode,
-            label_smoothing=mixup_smoothing, num_classes=1000) # Jort: Hard coded 1000 classes
-    else:
-        mixup_fn = None
+
+     mixup_fn = None
     criterion = tc.distill_criterion_type()
     if args.gradient_accumulation_steps > 1:
         raise NotImplementedError("Gradient accumulation is not supported for MHA distillation.")
@@ -105,48 +100,27 @@ def training_loop(args, tc):
         except StopIteration:
             train_iter = iter(tc.train_loader)
             X, y = next(train_iter)
-        # print('y', y.shape)
-        # print('X', X.shape)
-        # if mixup_fn is not None: 
-        #     y, X = mixup_fn(X, y) Jort: Maybe to put back later? 
-        # print('y', y.shape)
-        # print('X', X.shape)
-        # # training step
-        # (save inputs and outputs with hooks)
+
         set_for_distillation_iteration(tc)        
-        # quantize_local = VectorQuantizer2(
-        #     vocab_size=tc.model_vae.vocab_size, Cvae=32, using_znorm=False, beta=0.25,
-        #     default_qresi_counts=0, v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16), quant_resi=0.5, share_quant_resi=4,
-        # )
 
         with torch.no_grad():
             B, V = y.shape[0], tc.model_vae.vocab_size
             X = X.to(dist.get_device(), non_blocking=True)
             label_B = y.to(dist.get_device(), non_blocking=True)
-            gt_idx_Bl: List[ITen] = tc.model_vae.img_to_idxBl(X) # This does not return None
+            gt_idx_Bl: List[ITen] = tc.model_vae.img_to_idxBl(X)
             x_BLCv_wo_first_l: Ten = tc.model_vae.quantize.idxBl_to_var_input(gt_idx_Bl)
             tc.base_model(label_B, x_BLCv_wo_first_l)
 
-        # iterate over each layer, calculate loss for each ACM individually
+        # iterate over each layer, calculate loss for each ACM individuadlly
         module_losses = []
 
         for module_name in tc.replaced_module_names:
             module = tc.replacement_modules[module_name]
-            # print("-"*100)
-            # print(module)
-            # print(tc.base_model)
-            # print("-"*100)
+
             original_input = tc.base_modules_inputs[module_name][0].detach()
             original_output = tc.base_modules_outputs[module_name].detach()
             with tc.accelerator.autocast():
-                #print("*"*100)
                 output = module(original_input)
-                # print("*"*100)
-                # print(output)
-                # print('-'*100)
-                # print(original_output)
-                # print("*"*100)
-                # Check for NaN values in the output
                 nan_count = torch.sum(torch.isnan(output)).item()
 
                 if nan_count > 0:
@@ -157,9 +131,7 @@ def training_loop(args, tc):
 
                 assert not torch.any(
                     torch.isnan(output)), f'NaN present in {module_name} output of batch {tc.state.current_batch}'
-                # print(output.shape)
-                # print(original_output.shape)
-                # print("*"*100)
+
                 module_loss = criterion(output, original_output)
                 assert not torch.any(
                     torch.isnan(module_loss)), f'NaN present in {module_name} loss for batch {tc.state.current_batch}'

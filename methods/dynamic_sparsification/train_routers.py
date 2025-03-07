@@ -15,6 +15,7 @@ from train import TrainingContext, setup_accelerator, setup_data, setup_optimiza
 from utils import load_model, save_state, remove_hooks, save_final, Mixup, get_lrs, \
     get_module_name, add_save_inputs_hook, add_save_output_norm_hook
 from utils_var import arg_util
+from utils_var.misc import create_npz_from_sample_folder
 from trainer import VARTrainer
 import dist
 from architectures.moe.dsti import dsti_mlp_filter_condition
@@ -29,7 +30,19 @@ import random
 import torch, torchvision
 import numpy as np
 import os
+import os
+import torch
+import numpy as np
+import random
+from tqdm import tqdm
+from PIL import Image
+import shutil
 from collections import OrderedDict
+import torch
+import torch.nn as nn
+from torch import autocast
+import torch_fidelity
+
 
 class RouterTrainingContext(TrainingContext):
     moe_modules: Dict[str, nn.Module] = None
@@ -76,7 +89,7 @@ def make_image(var, args):
         with torch.autocast('cuda', enabled=True, dtype=torch.float32, cache_enabled=True):    # using bfloat16 can be faster
             recon_B3HW, debug_data = var.autoregressive_infer_cfg(B=B, label_B=label_B, cfg=cfg, top_k=900, top_p=0.95, g_seed=seed, more_smooth=more_smooth, plotting_PCA=False)
 
-    return debug_data
+    return recon_B3HW, debug_data
 
 def setup_model(args, tc):
     assert args.model_class == 'dsti_router'
@@ -84,137 +97,245 @@ def setup_model(args, tc):
     # Base class
     model, tc.model_vae = get_var_d16()
     tc.initial_model = copy.deepcopy(model)
-    debug_data = make_image(tc.initial_model, args)
+    #_ , debug_data = make_image(tc.initial_model, args)
 
-    initial_weights = {}
-    for name, param in model.named_parameters():
-        initial_weights[name] = param.clone()
-
-
-    # Include Sparsity or not
-    include_sparsity = False
-    if include_sparsity:	
-        final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_enforce_sparsity_C5DOGOFE_1/final.pth')
-        final_state = torch.load(final_path, map_location=args.device)
-        state_dict = final_state['model_state'] 
-        model_arg = final_state['args'].model_args
-        activations_to_sparsify = find_gelu_activations(model, **model_arg)
-        model = replace_with_relu(model, activations_to_sparsify)
-        model = model.to(args.device)
-        new_state_dict = OrderedDict()
-        for k, v in state_dict.items():
-            new_key = k.replace("module.", "")
-            new_state_dict[new_key] = v
-
-        model.load_state_dict(new_state_dict)
-        final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_dsti_expert_split_4KAHVWXI_1/final.pth')        
-    else:
-        final_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/TINYIMAGENET_PATH_dsti_expert_split_FANB4KGP_1/final.pth')
+    # initial_weights = {}
+    # for name, param in model.named_parameters():
+    #     initial_weights[name] = param.clone()
 
 
-    final_state = torch.load(final_path, map_location=args.device)
-    state_dict = final_state['model_state']
-    model_arg = final_state['args'].model_args
-    model, _ = replace_with_moes(model, **model_arg, module_filter_contition=dsti_mlp_filter_condition)
-    model = model.to(args.device)
+    # if args.activation in ['gelu', 'relu']:
+    #     init_path = Path(args.path_file_ft)
+    #     final_state = torch.load(init_path, map_location=args.device)
+    #     state_dict = final_state['model_state']
+    #     model_arg = final_state['args'].model_args
 
-    model.load_state_dict(state_dict)
-    tc.moe_modules = add_routers(model, args.model_args)
-    init_fun = INIT_NAME_MAP[args.init_fun]
-    if init_fun is not None:
-        init_fun(tc.model)
+    #     if args.activation == 'relu':
+    #         activations_to_sparsify = find_gelu_activations(model, **model_arg)
+    #         model = replace_with_relu(model, activations_to_sparsify)
 
-    tc.model = tc.accelerator.prepare(model)
+    #     model = model.to(args.device)
+    #     new_state_dict = OrderedDict((k.replace("module.", ""), v) for k, v in state_dict.items())
+    #     model.load_state_dict(new_state_dict)
 
+    # final_path = Path(args.path_file_moe)
+    # final_state = torch.load(final_path, map_location=args.device)
+    # state_dict = final_state['model_state']
+    # model_arg = final_state['args'].model_args
+    # model, _ = replace_with_moes(model, **model_arg, module_filter_contition=dsti_mlp_filter_condition)
+    # model = model.to(args.device)
+
+    # model.load_state_dict(state_dict)
+    # tc.moe_modules = add_routers(model, args.model_args)
+    # init_fun = INIT_NAME_MAP[args.init_fun]
+    # if init_fun is not None:
+    #     init_fun(tc.model)
+
+    # tc.model = tc.accelerator.prepare(model)
+
+
+    # # # Now check each block's FFN experts:
     
-    # Compare the parameters (excluding FFN parameters)
-
-    # Check non-FFN parameters normally:
-    for name, param in tc.model.named_parameters():
-        if "ffn" not in name:
-            if not torch.allclose(param, initial_weights[name], rtol=0, atol=0):
-                print(f"Parameter {name} changed!")
- 
-
-    # Now check each block's FFN experts:
-    
-    for i, block in enumerate(tc.model.blocks):
-        if hasattr(block, "ffn") and hasattr(block.ffn, "experts"):
-            expert_weights = [expert.w.data for expert in block.ffn.experts.layers]
+    # for i, block in enumerate(tc.model.blocks):
+    #     if hasattr(block, "ffn") and hasattr(block.ffn, "experts"):
+    #         expert_weights = [expert.w.data for expert in block.ffn.experts.layers]
             
-            # Check fc1 and fc2
-            for jk in range(1, 3):
-                ffn_key = f"blocks.{i}.ffn.fc{jk}.weight"
-                if ffn_key not in initial_weights:
-                    print(f"Block {i}: Key {ffn_key} not found in initial weights.")
-                    continue
+    #         # Check fc1 and fc2
+    #         for jk in range(1, 3):
+    #             ffn_key = f"blocks.{i}.ffn.fc{jk}.weight"
+    #             if ffn_key not in initial_weights:
+    #                 print(f"Block {i}: Key {ffn_key} not found in initial weights.")
+    #                 continue
 
-                original_ffn_weight = initial_weights[ffn_key]
+    #             original_ffn_weight = initial_weights[ffn_key]
 
-                # 1) We'll just check the sum of all experts' weights
-                #    to see if it's the same as the sum of the original layer's weight.
-                # For example, sum up absolute or plain sums, or do a norm, etc.
-                # We'll do a plain sum here.
-                expert_sum = 0.0
-                for w in expert_weights[jk - 1]:  # w => shape [whatever dims…]
-                    expert_sum += w.sum().item()  # w is a 2D or 3D tensor, so .sum() is the sum of all elements.
+    #             # 1) We'll just check the sum of all experts' weights
+    #             #    to see if it's the same as the sum of the original layer's weight.
+    #             # For example, sum up absolute or plain sums, or do a norm, etc.
+    #             # We'll do a plain sum here.
+    #             expert_sum = 0.0
+    #             for w in expert_weights[jk - 1]:  # w => shape [whatever dims…]
+    #                 expert_sum += w.sum().item()  # w is a 2D or 3D tensor, so .sum() is the sum of all elements.
 
-                # Then compare with the original weight's sum:
-                original_sum = original_ffn_weight.sum().item()
+    #             # Then compare with the original weight's sum:
+    #             original_sum = original_ffn_weight.sum().item()
 
-                sum_diff = abs(expert_sum - original_sum)
-                if sum_diff < 1e-4:  # pick a threshold that’s good for your scale
-                    print(f"Block {i} fc{jk}: The sum of all experts' weights ~ the sum of original FFN weights. sum_diff={sum_diff:.5f}")
-                else:
-                    print(f"Block {i} fc{jk}: The sum of experts' weights != original. sum_diff={sum_diff:.5f}")
-                    unchanged = False
+    #             sum_diff = abs(expert_sum - original_sum)
+    #             if sum_diff < 1e-4:  # pick a threshold that’s good for your scale
+    #                 print(f"Block {i} fc{jk}: The sum of all experts' weights ~ the sum of original FFN weights. sum_diff={sum_diff:.5f}")
+    #             else:
+    #                 print(f"Block {i} fc{jk}: The sum of experts' weights != original. sum_diff={sum_diff:.5f}")
+    #                 unchanged = False
 
-                # 2) Optionally, do more advanced checks (like L2 norm or a direct reorder).
-                #    e.g., check L2 norm if you prefer:
-                #    expert_l2, orig_l2 = 0.0, torch.norm(original_ffn_weight).item()
-                #    for w in expert_weights[jk - 1]:
-                #        expert_l2 += w.pow(2).sum().item()
-                #    expert_l2 = math.sqrt(expert_l2)
-                #    diff_l2 = abs(expert_l2 - orig_l2)
-                #    # etc.
+    #             # 2) Optionally, do more advanced checks (like L2 norm or a direct reorder).
+    #             #    e.g., check L2 norm if you prefer:
+    #             #    expert_l2, orig_l2 = 0.0, torch.norm(original_ffn_weight).item()
+    #             #    for w in expert_weights[jk - 1]:
+    #             #        expert_l2 += w.pow(2).sum().item()
+    #             #    expert_l2 = math.sqrt(expert_l2)
+    #             #    diff_l2 = abs(expert_l2 - orig_l2)
+    #             #    # etc.
 
 
-                    # set args
+    #                 # set args
 
-    for tau in args.dsti_tau_to_eval:
-        seed = 0 #@param {type:"number"}
-        torch.manual_seed(seed)
-        num_sampling_steps = 250 #@param {type:"slider", min:0, max:1000, step:1}
-        cfg = 4 #@param {type:"slider", min:1, max:10, step:0.1}
-        more_smooth = False # True for more smooth output
-        class_labels = (0,) 
 
-        # seed
-        torch.manual_seed(seed)
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+    # # Check non-FFN parameters normally:
+    # for name, param in tc.model.named_parameters():
+        # if "ffn" not in name:
+        #     if not torch.allclose(param, initial_weights[name], rtol=0, atol=0):
+        #         print(f"Parameter {name} changed!")
 
-        # run faster
-        tf32 = True
-        torch.backends.cudnn.allow_tf32 = bool(tf32)
-        torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
-        torch.set_float32_matmul_precision('high' if tf32 else 'highest')
+    if not args.fid:
+        for tau in args.dsti_tau_to_eval:
+            seed = 0
+            torch.manual_seed(seed)
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
 
-        #tc.initial_model.rng.manual_seed(seed)
-        tc.model.rng.manual_seed(seed)
-        rng = tc.model.rng
+            tf32 = True
+            torch.backends.cudnn.allow_tf32 = bool(tf32)
+            torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
+            torch.set_float32_matmul_precision('high' if tf32 else 'highest')
+            tc.model.rng.manual_seed(seed)
+            rng = tc.model.rng
 
-        B = len(class_labels)
-        label_B: torch.LongTensor = torch.tensor(class_labels, device=args.device)
+            # ------------------------------------------------------------------------------
+            # 2. Configure output folder and sampling parameters.
+            # ------------------------------------------------------------------------------
+            type_of_model = (
+                "MoE_FT_Gelu" if args.activation == "gelu" 
+                else "MoE_FT_Relu" if args.activation == "relu" 
+                else "MoE_no_FT"
+            )
+            #os.makedirs(sample_folder, exist_ok=True)
+            # Check if directory exists
+                
+            cfg                = 4 #1.5
+            more_smooth        = False
 
+            class_labels = (0,)  #@param {type:"raw"}
+            
+            B = len(class_labels)
+            label_B: torch.LongTensor = torch.tensor(class_labels, device=args.device)
+
+            # Autoregressive sampling
+            with torch.inference_mode():
+                with torch.autocast('cuda', enabled=True, dtype=torch.float32, cache_enabled=True):
+                    recon_B3HW, _ = autoregressive_infer_cfg_with_expert_plot(tc=tc, B=B, label_B=label_B, cfg=cfg, top_k=900, top_p=0.95, rng=rng, more_smooth=more_smooth, tau=tau, debug_data=debug_data, compare_dicts=True, type_of_model=type_of_model, final_path_save=args.final_path_save)
+            
+
+    if args.fid:
+        for tau in args.dsti_tau_to_eval:
+            seed = 0
+            torch.manual_seed(seed)
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+
+            tf32 = True
+            torch.backends.cudnn.allow_tf32 = bool(tf32)
+            torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
+            torch.set_float32_matmul_precision('high' if tf32 else 'highest')
+            model.rng.manual_seed(seed)
+            rng = model.rng
+
+            # ------------------------------------------------------------------------------
+            # 2. Configure output folder and sampling parameters.
+            # ------------------------------------------------------------------------------
+            type_of_model = (
+                "MoE_FT_Gelu" if args.activation == "gelu" 
+                else "MoE_FT_Relu" if args.activation == "relu" 
+                else "MoE_no_FT"
+            )
+            sample_folder  = f'../../../../scratch-shared/jvincenti/{args.final_path_save}_tau_{tau}_samples_256x256'  # Where to save the 50,000 PNGs
+            
+            os.makedirs(sample_folder, exist_ok=True)
+            # Check if directory exists
+            num_classes        = 1000               #  1000 ImageNet classes
+            samples_per_class  = 10                 #  10k total
+            cfg                = 1.5
+            top_p              = 0.96
+            top_k              = 900
+            more_smooth        = False
+
+            # Assume num_classes and samples_per_class are defined.
+            # Create a list of labels: each class is repeated samples_per_class times.
+            all_labels = []
+            for class_idx in range(num_classes):
+                all_labels.extend([class_idx] * samples_per_class)
+            all_labels = np.array(all_labels)
+
+            # Define your new batch size B (which can be greater than samples_per_class)
+            B = 32  # e.g., B = 64
+
+            num_total_samples = len(all_labels)
+            num_batches = num_total_samples // B
+
+            final_flops = 0
+            final_mean_flops = 0
+
+            for batch_idx in range(num_batches):
+                # Create label_B for the batch: a combination of class indices.
+                batch_labels = all_labels[batch_idx * B : (batch_idx + 1) * B]
+                label_B = torch.tensor(batch_labels, device='cuda')
+                
+                # Autoregressive sampling with batch size B.
+                with torch.no_grad():
+                    with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):
+                        recon_B3HW, _ = model.autoregressive_infer_cfg(B=B, label_B=label_B, cfg=cfg, top_k=900, top_p=0.95, g_seed=seed, more_smooth=more_smooth, plotting_PCA=False)
+                        # recon_B3HW, mean_flops, total_flops = autoregressive_infer_cfg_with_expert_plot(
+                        #     tc=tc, B=B, label_B=label_B, cfg=cfg, top_k=900, top_p=0.95,
+                        #     rng=rng, more_smooth=more_smooth, tau=tau, debug_data=debug_data,
+                        #     compare_dicts=False, type_of_model=type_of_model, final_path_save=None
+                        # )
+                # final_mean_flops += mean_flops
+                # final_flops += total_flops
+
+
+                # Convert output to [0,1] range.
+                recon_B3HW = (recon_B3HW + 1) / 2
+
+                # Save each generated image.
+                for i in range(B):
+                    img_tensor = recon_B3HW[i].detach().cpu().clamp(0, 1)
+                    img_array = (img_tensor.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
+                    img_pil = Image.fromarray(img_array)
+                    # Use the class label from batch_labels to name the file, along with a global index.
+                    global_idx = batch_idx * B + i
+                    filename = f"class_{batch_labels[i]:04d}_{global_idx:05d}.png"
+                    img_pil.save(os.path.join(sample_folder, filename))            
+            #print(f"Done! Images saved to: {sample_folder}")
+            # final_flops = final_flops/(num_classes*samples_per_class)
+            # final_mean_flops = final_mean_flops/num_classes
+            # Now calculate_metrics:
+            input2 = None
+            fid_statistics_file = 'adm_in256_stats.npz'
+
+            metrics_dict = torch_fidelity.calculate_metrics(
+                input1=sample_folder,
+                input2=input2,
+                fid_statistics_file=fid_statistics_file,
+                cuda=True,
+                isc=True,
+                fid=True,
+                kid=False,
+                prc=False,
+                verbose=False,
+            )
+            print("*"*100)
+            print(f'Final Fid for {tau}', args.final_path_save)
+            print(metrics_dict)
+            print("FID:", metrics_dict['frechet_inception_distance'])
+            print("inception_score: ", metrics_dict['inception_score_mean'])
+            #print('Avwerage Flops per sample', final_flops)
+            print("*"*100)
+
+            shutil.rmtree(sample_folder)
         
-        with torch.inference_mode():
-            with torch.autocast('cuda', enabled=True, dtype=torch.float32, cache_enabled=True):    # using bfloat16 can be faster
-                type_of_model= "MoE_FT" if include_sparsity else "MoE_no_FT"
-                autoregressive_infer_cfg_with_expert_plot(tc=tc, B=B, label_B=label_B, cfg=cfg, top_k=900, top_p=0.95, rng=rng, more_smooth=more_smooth, tau=tau, debug_data=debug_data, type_of_model=type_of_model)
-
     asdasdas
 
 
@@ -627,3 +748,127 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+
+    # # Now check each block's FFN experts:
+    
+    # for i, block in enumerate(tc.model.blocks):
+    #     if hasattr(block, "ffn") and hasattr(block.ffn, "experts"):
+    #         expert_weights = [expert.w.data for expert in block.ffn.experts.layers]
+            
+    #         # Check fc1 and fc2
+    #         for jk in range(1, 3):
+    #             ffn_key = f"blocks.{i}.ffn.fc{jk}.weight"
+    #             if ffn_key not in initial_weights:
+    #                 print(f"Block {i}: Key {ffn_key} not found in initial weights.")
+    #                 continue
+
+    #             original_ffn_weight = initial_weights[ffn_key]
+
+    #             # 1) We'll just check the sum of all experts' weights
+    #             #    to see if it's the same as the sum of the original layer's weight.
+    #             # For example, sum up absolute or plain sums, or do a norm, etc.
+    #             # We'll do a plain sum here.
+    #             expert_sum = 0.0
+    #             for w in expert_weights[jk - 1]:  # w => shape [whatever dims…]
+    #                 expert_sum += w.sum().item()  # w is a 2D or 3D tensor, so .sum() is the sum of all elements.
+
+    #             # Then compare with the original weight's sum:
+    #             original_sum = original_ffn_weight.sum().item()
+
+    #             sum_diff = abs(expert_sum - original_sum)
+    #             if sum_diff < 1e-4:  # pick a threshold that’s good for your scale
+    #                 print(f"Block {i} fc{jk}: The sum of all experts' weights ~ the sum of original FFN weights. sum_diff={sum_diff:.5f}")
+    #             else:
+    #                 print(f"Block {i} fc{jk}: The sum of experts' weights != original. sum_diff={sum_diff:.5f}")
+    #                 unchanged = False
+
+    #             # 2) Optionally, do more advanced checks (like L2 norm or a direct reorder).
+    #             #    e.g., check L2 norm if you prefer:
+    #             #    expert_l2, orig_l2 = 0.0, torch.norm(original_ffn_weight).item()
+    #             #    for w in expert_weights[jk - 1]:
+    #             #        expert_l2 += w.pow(2).sum().item()
+    #             #    expert_l2 = math.sqrt(expert_l2)
+    #             #    diff_l2 = abs(expert_l2 - orig_l2)
+    #             #    # etc.
+
+
+    #                 # set args
+
+
+
+    
+    # # Check non-FFN parameters normally:
+    # for name, param in tc.model.named_parameters():
+    #     if "ffn" not in name:
+    #         if not torch.allclose(param, initial_weights[name], rtol=0, atol=0):
+    #             print(f"Parameter {name} changed!")
+
+        # for tau in args.dsti_tau_to_eval:
+        #     seed = 0
+        #     torch.manual_seed(seed)
+        #     random.seed(seed)
+        #     np.random.seed(seed)
+        #     torch.backends.cudnn.deterministic = True
+        #     torch.backends.cudnn.benchmark = False
+
+        #     tf32 = True
+        #     torch.backends.cudnn.allow_tf32 = bool(tf32)
+        #     torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
+        #     torch.set_float32_matmul_precision('high' if tf32 else 'highest')
+        #     tc.model.rng.manual_seed(seed)
+        #     rng = tc.model.rng
+
+        #     # ------------------------------------------------------------------------------
+        #     # 2. Configure output folder and sampling parameters.
+        #     # ------------------------------------------------------------------------------
+        #     type_of_model = (
+        #         "MoE_FT_Gelu" if args.activation == "gelu" 
+        #         else "MoE_FT_Relu" if args.activation == "relu" 
+        #         else "MoE_no_FT"
+        #     )
+        #     sample_folder  = f'../../../../scratch-shared/jvincenti/{args.final_path_save}_tau_{tau}_samples_256x256'  # Where to save the 50,000 PNGs
+            
+        #     os.makedirs(sample_folder, exist_ok=True)
+        #     # Check if directory exists
+        #     num_classes        = 1000               # e.g. 1000 ImageNet classes
+        #     samples_per_class  = 50                 # 50 images per class => 50k total
+        #     cfg                = 1.5
+        #     top_p              = 0.96
+        #     top_k              = 900
+        #     more_smooth        = False
+                
+        #     for class_idx in tqdm(range(num_classes), desc='Sampling'):
+        #         # Create a batch of size = samples_per_class with the same class label
+        #         label_B = torch.tensor([class_idx] * samples_per_class, device='cuda')
+                
+        #         # Autoregressive sampling
+        #         with torch.inference_mode():
+        #             with torch.autocast('cuda', enabled=True, dtype=torch.float16):
+        #                 recon_B3HW = autoregressive_infer_cfg_with_expert_plot(tc=tc, B=samples_per_class, label_B=label_B, cfg=cfg, top_k=900, top_p=0.95, rng=rng, more_smooth=more_smooth, tau=tau, debug_data=debug_data, compare_dicts=False, type_of_model=type_of_model, final_path_save=None)
+                
+        #         # recon_B3HW should have shape [B, 3, H, W]. Save each image in the batch.
+        #         for i in range(samples_per_class):
+        #             # Convert each image [3,H,W] to a PIL Image (uint8)
+        #             # Scale from [0,1] or [-1,1] as needed, depending on your model’s output
+        #             # Here we assume recon_B3HW is in [0,1]. If it's in another scale,
+        #             # adjust the multiplication and clamp accordingly.
+        #             img_tensor = recon_B3HW[i].detach().cpu().clamp(0,1)
+        #             img_pil = Image.fromarray(
+        #                 (img_tensor.permute(1,2,0).numpy() * 255).astype(np.uint8)
+        #             )
+                    
+        #             # Build filename like 00000001_123.png, indicating (class_####) + image index
+        #             filename = f"class_{class_idx:04d}_{i:02d}.png"
+        #             img_pil.save(os.path.join(sample_folder, filename))
+
+        #     print(f"Done! Images saved to: {sample_folder}")
+
+        #     # ------------------------------------------------------------------------------
+        #     # 4. (Optional) Build the .npz file for FID/IS evaluation
+        #     #    using your provided helper function:
+        #     # ------------------------------------------------------------------------------
+        #     # from utils.misc import create_npz_from_sample_folder
+        #     npz_path = create_npz_from_sample_folder(sample_folder)
+        #     print(f"Saved .npz file to {npz_path}")

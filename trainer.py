@@ -77,8 +77,6 @@ class VARTrainer(object):
         x_BLCv_wo_first_l = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)
         sample = (label_B, x_BLCv_wo_first_l)
 
-        print("Benchmarking...")
-        print('Final Model:', self.var_wo_ddp)
         model_costs, param_count_dict = benchmark_with_sample(self.var_wo_ddp, sample)
 
         ##################################################################
@@ -89,8 +87,11 @@ class VARTrainer(object):
 
         last_inp_B3HW = None
         last_logits_BLV = None
+        max_iters = len(ld_val) // 100  # integer division for 1/4 of the dataset
 
-        for inp_B3HW, label_B in ld_val:
+        for i, (inp_B3HW, label_B) in enumerate(ld_val):
+            if i >= max_iters:
+                break  # stop after 1/4 of the loader
             B, V = label_B.shape[0], self.vae_local.vocab_size
 
             inp_B3HW = inp_B3HW.to(device, non_blocking=True)
@@ -132,65 +133,65 @@ class VARTrainer(object):
         ##################################################################
         # 3. Plotting the final batch predictions (updated)
         ##################################################################
-        if last_inp_B3HW is not None and last_logits_BLV is not None:
-            # Convert logits to tokens (shape: [B, sum_of_scales])
-            pred_BL = last_logits_BLV.softmax(dim=-1).argmax(dim=-1)
+        # if last_inp_B3HW is not None and last_logits_BLV is not None:
+        #     # Convert logits to tokens (shape: [B, sum_of_scales])
+        #     pred_BL = last_logits_BLV.softmax(dim=-1).argmax(dim=-1)
 
-            # Instead of using a hard-coded list, build the split sizes based on the model’s patch numbers.
-            # It is assumed that self.vae_local.patch_nums holds the list of patch sizes used in autoregressive inference.
-            v_patch_nums = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
-            split_sizes = []
-            for scale in v_patch_nums: 
-                split_sizes.append(scale * scale)
+        #     # Instead of using a hard-coded list, build the split sizes based on the model’s patch numbers.
+        #     # It is assumed that self.vae_local.patch_nums holds the list of patch sizes used in autoregressive inference.
+        #     v_patch_nums = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
+        #     split_sizes = []
+        #     for scale in v_patch_nums: 
+        #         split_sizes.append(scale * scale)
 
-            # pred_BL => [B, sum_of_scales], chunk by 'split_sizes'
-            scales_tokens = torch.split(pred_BL, split_sizes, dim=1)  # => tuple of [B, pn^2]
+        #     # pred_BL => [B, sum_of_scales], chunk by 'split_sizes'
+        #     scales_tokens = torch.split(pred_BL, split_sizes, dim=1)  # => tuple of [B, pn^2]
 
-            # Decode only the final scale tokens.
-            # Note: idxBl_to_img expects a list of tokens; here we wrap the final scale tokens in a list.
-            final_scale_tokens = scales_tokens[-1]
-            pred_img_B3HW = self.vae_local.idxBl_to_img(
-                ms_idx_Bl=[final_scale_tokens],
-                same_shape=True,   # upsample smaller scales if needed
-                last_one=True      # returns a single [B, 3, H, W] image instead of a list
-            )
+        #     # Decode only the final scale tokens.
+        #     # Note: idxBl_to_img expects a list of tokens; here we wrap the final scale tokens in a list.
+        #     final_scale_tokens = scales_tokens[-1]
+        #     pred_img_B3HW = self.vae_local.idxBl_to_img(
+        #         ms_idx_Bl=[final_scale_tokens],
+        #         same_shape=True,   # upsample smaller scales if needed
+        #         last_one=True      # returns a single [B, 3, H, W] image instead of a list
+        #     )
 
-            # Debug prints: check shapes and value ranges
-            print("GT Shape:", last_inp_B3HW.shape,
-                "GT Min/Max:", last_inp_B3HW.min().item(), last_inp_B3HW.max().item())
-            print("Pred Shape:", pred_img_B3HW.shape,
-                "Pred Min/Max:", pred_img_B3HW.min().item(), pred_img_B3HW.max().item())
+        #     # Debug prints: check shapes and value ranges
+        #     print("GT Shape:", last_inp_B3HW.shape,
+        #         "GT Min/Max:", last_inp_B3HW.min().item(), last_inp_B3HW.max().item())
+        #     print("Pred Shape:", pred_img_B3HW.shape,
+        #         "Pred Min/Max:", pred_img_B3HW.min().item(), pred_img_B3HW.max().item())
 
-            # Rescale images from [-1, 1] to [0, 1] for visualization
-            true_img_B3HW = (last_inp_B3HW + 1) / 2
-            pred_img_B3HW = (pred_img_B3HW + 1) / 2
+        #     # Rescale images from [-1, 1] to [0, 1] for visualization
+        #     true_img_B3HW = (last_inp_B3HW + 1) / 2
+        #     pred_img_B3HW = (pred_img_B3HW + 1) / 2
 
-            # Plot batch images
-            batch_size = last_inp_B3HW.shape[0]
-            fig, axes = plt.subplots(2, batch_size, figsize=(batch_size * 3, 6))
+        #     # Plot batch images
+        #     batch_size = last_inp_B3HW.shape[0]
+        #     fig, axes = plt.subplots(2, batch_size, figsize=(batch_size * 3, 6))
 
-            for i in range(batch_size):
-                true_img_np = true_img_B3HW[i].detach().cpu().permute(1, 2, 0).numpy()
-                pred_img_np = pred_img_B3HW[i].detach().cpu().permute(1, 2, 0).numpy()
+        #     for i in range(batch_size):
+        #         true_img_np = true_img_B3HW[i].detach().cpu().permute(1, 2, 0).numpy()
+        #         pred_img_np = pred_img_B3HW[i].detach().cpu().permute(1, 2, 0).numpy()
 
-                # Clip the values to [0,1] for proper display
-                true_img_np = np.clip(true_img_np, 0, 1)
-                pred_img_np = np.clip(pred_img_np, 0, 1)
+        #         # Clip the values to [0,1] for proper display
+        #         true_img_np = np.clip(true_img_np, 0, 1)
+        #         pred_img_np = np.clip(pred_img_np, 0, 1)
 
-                axes[0, i].imshow(true_img_np)
-                axes[0, i].set_title(f"GT (sample={i})")
-                axes[0, i].axis("off")
+        #         axes[0, i].imshow(true_img_np)
+        #         axes[0, i].set_title(f"GT (sample={i})")
+        #         axes[0, i].axis("off")
 
-                axes[1, i].imshow(pred_img_np)
-                axes[1, i].set_title(f"Prediction (sample={i})")
-                axes[1, i].axis("off")
+        #         axes[1, i].imshow(pred_img_np)
+        #         axes[1, i].set_title(f"Prediction (sample={i})")
+        #         axes[1, i].axis("off")
 
-            plt.tight_layout()
-            plt.savefig("batch_predicted_images_fixed.png")
-            plt.close(fig)
-            print(f"Saved {batch_size} images in 'batch_predicted_images_fixed.png'")
+        #     plt.tight_layout()
+        #     plt.savefig("batch_predicted_images_fixed.png")
+        #     plt.close(fig)
+        #     print(f"Saved {batch_size} images in 'batch_predicted_images_fixed.png'")
 
-        ##################################################################
+        # ##################################################################
         # 4. Return same outputs
         ##################################################################
         return (
