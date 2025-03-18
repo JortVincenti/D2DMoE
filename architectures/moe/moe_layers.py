@@ -38,16 +38,27 @@ class ExecuteAllExpertsLayer(nn.Module):
         if self.bias:
             self.b = nn.Parameter(torch.empty(num_experts, 1, out_dim))
             init_(self.b)
-        self.act = activation()
+        if activation is nn.GELU:
+            self.act = activation(approximate='tanh')
+        else:
+            self.act = activation()
 
     def forward(self, x):
+        global print_first
         x = torch.einsum('eni,eio->eno', x, self.w)
+        # if print_first:
+        #     print('x from ExecuteAllExpertsLayer', x.sum())
+            
         if self.bias:
             x = x + self.b
+            # if print_first:
+            #     print('x after bias', x.sum())
+            #     print('bias sum', self.b.sum())
 
         return self.act(x)
 
 
+print_first = True
 class ExecuteAllExperts(ExpertsLayer):
     def __init__(self,
                  dim,
@@ -85,6 +96,7 @@ class ExecuteAllExperts(ExpertsLayer):
             self.layers.append(ExecuteAllExpertsLayer(expert_dim, dim, num_experts, bias, nn.Identity))
 
     def forward(self, x, routing_tensor):
+        #global print_first
         assert x.dim() == 2, f'{x.size()=}'
         # x is of size (batch_size * sequence_length, dim)
         # routing_tensor is of size (batch_size * sequence_length, num_experts)
@@ -98,7 +110,19 @@ class ExecuteAllExperts(ExpertsLayer):
         else:
             for i, layer in enumerate(self.layers):
                 x = layer(x)
+                # if print_first:
+                #     print(f"Intermediate Layer output for layer {i}", x.sum())
+                #     print('SUm of weights for layer is {:.20f}'.format(layer.w.sum()))
+                #     try:
+                #         print('SUm of biases for layer is {:.20f}'.format(layer.b.sum()))
+                #     except:
+                #         continue
+                #     print('---'*30)
+            # x += self.layers[-1].last_bias
             x = torch.einsum('end,ne->nd', x, routing_tensor)
+            # if print_first:
+            #     # print('output tensor x', x.sum())
+            #     print_first = False
             return x
 
 
@@ -210,6 +234,16 @@ class CustomKernelExperts(ExpertsLayer):
             current_expert_x = current_expert_x @ self.w2[i]
             outputs[current_expert_samples_mask] += current_expert_x
         return outputs
+
+    def forward_without_routing(self, x: torch.Tensor) -> torch.Tensor:
+
+        # 2) apply the "first layer" (which is your intermediate_activation_extraction_stub)
+        x = self.intermediate_activation_extraction_stub(x, self.w1, self.b1, self.act)
+
+        # 3) apply the "second layer" (which is your output_activation_extraction_stub)
+        x = self.output_activation_extraction_stub(x, self.w2)
+
+        return x
 
     @staticmethod
     # @torch.compile(fullgraph=True, dynamic=True, mode='max-autotune')

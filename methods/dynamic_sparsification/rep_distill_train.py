@@ -17,6 +17,7 @@ from utils_var import arg_util
 from architectures.quant import VectorQuantizer2
 import dist
 from trainer import VARTrainer
+from architectures.pretrained import get_var_d16
 
 class ReplaceModulesTrainingContext(TrainingContext):
     base_model: torch.nn.Module = None
@@ -81,7 +82,7 @@ def training_loop(args, tc):
     train_iter = iter(tc.train_loader)
     unwrapped_model = tc.accelerator.unwrap_model(tc.model)
 
-     mixup_fn = None
+    mixup_fn = None
     criterion = tc.distill_criterion_type()
     if args.gradient_accumulation_steps > 1:
         raise NotImplementedError("Gradient accumulation is not supported for MHA distillation.")
@@ -113,52 +114,54 @@ def training_loop(args, tc):
 
         # iterate over each layer, calculate loss for each ACM individuadlly
         module_losses = []
-
+        #print('tc.replaced_module_names', tc.replaced_module_names)
         for module_name in tc.replaced_module_names:
             module = tc.replacement_modules[module_name]
-
+            # print('module_name', module_name)
+            # print("module", module)
             original_input = tc.base_modules_inputs[module_name][0].detach()
             original_output = tc.base_modules_outputs[module_name].detach()
+           
             with tc.accelerator.autocast():
+                
                 output = module(original_input)
-                nan_count = torch.sum(torch.isnan(output)).item()
 
-                if nan_count > 0:
-                    print(f"Number of NaN values in {module_name} output of batch {tc.state.current_batch}: {nan_count}")
+
+                # nan_count = torch.sum(torch.isnan(output)).item()
+
+                # if nan_count > 0:
+                #     print(f"Number of NaN values in {module_name} output of batch {tc.state.current_batch}: {nan_count}")
                     # Optionally replace NaNs with -inf if needed
                     #output = torch.where(torch.isnan(output), torch.tensor(float('-inf'), device=output.device), output)
 
-
-                assert not torch.any(
-                    torch.isnan(output)), f'NaN present in {module_name} output of batch {tc.state.current_batch}'
-
                 module_loss = criterion(output, original_output)
+                
+                # print("output", output.sum())
+                # print('original_output', original_output.sum())
+                # print('module_loss', module_loss)
+                # print('-'*100)
                 assert not torch.any(
                     torch.isnan(module_loss)), f'NaN present in {module_name} loss for batch {tc.state.current_batch}'
             module_losses.append(module_loss)
             del original_input, original_output, output
-            if tc.accelerator.is_main_process:
-                tc.writer.add_scalar(f'Train/Module {module_name} loss', module_loss.item(),
-                                     global_step=tc.state.current_batch)
-        
+
         # Stack module losses
-        distill_losses = torch.stack(module_losses)
+        distill_losses = torch.stack(module_losses).mean()
 
         # Remove inf and -inf values
-        distill_losses = distill_losses[~torch.isinf(distill_losses)]
+        #distill_losses = distill_losses[~torch.isinf(distill_losses)]
 
         # Check if there are valid values left
-        if distill_losses.numel() > 0:
-            distill_loss = distill_losses.mean()
-        else:
-            distill_loss = torch.tensor(0.0, device=distill_losses.device)  # Default value if no valid losses
+        # if distill_losses.numel() > 0:
+        #     distill_loss = distill_losses.mean()
+        # else:
+        #     distill_loss = torch.tensor(0.0, device=distill_losses.device)  # Default value if no valid losses
 
-        print('module_losses', module_losses)
-        print('distill_loss', distill_loss)
-        if tc.accelerator.is_main_process:
-            tc.writer.add_scalar(f'Train/Rep. Distill Loss', distill_loss.item(), global_step=tc.state.current_batch)
+        #print('module_losses', module_losses)
+        print('distill_loss', distill_losses)
+
             # get activations / pre-activations and compute sparsity loss
-        total_loss = distill_loss
+        total_loss = distill_losses
         # warning! inputs (e.g. pre-activations for gelu) are tuples, outputs (e.g. relu activations) are tensors
         if args.dsti_enforce_weight > 0:
             sparsity_loss = 0.0
@@ -241,15 +244,9 @@ def train(args):
     setup_for_training(args, tc)
     setup_optimization(args, tc)
     setup_state(tc)
-    
-    make_vae(args, tc)
 
-    # training_loop(args, tc) # Jort: To put back when ready
+    training_loop(args, tc) # Jort: To put back when ready
 
-    var_ckpt = f'var_d16.pth'
-    tc.model_var_wo_ddp.load_state_dict(torch.load(var_ckpt, map_location='cuda'), strict=True)
-    var: DDP = (DDP if dist.initialized() else NullDDP)(tc.model_var_wo_ddp, device_ids=[dist.get_local_rank()], find_unused_parameters=False, broadcast_buffers=False)
-    tc.model = var
     # Build the trainer
     tc.trainer = VARTrainer(
         device=args.device, # correct

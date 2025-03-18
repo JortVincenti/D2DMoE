@@ -49,12 +49,12 @@ def main():
     qos = None
 
     # partition = 'plgrid-gpu-a100'
-    partition = 'gpu_h100'
+    partition = 'gpu'
     # partition = 'dgx'
     # partition = 'rtx3080'
     # partition = 'batch'
 
-    timeout = 60 #60 * 24 * 7
+    timeout = 2*60 #60 * 24 * 7
     # timeout = 60 * 24 * 2
 
     gpus_per_task = 1
@@ -86,7 +86,7 @@ def main():
     common_args.runs_dir = Path(os.environ['RUNS_DIR'])
     common_args.dataset = 'TINYIMAGENET_PATH' #'imagenet'
     common_args.dataset_args = {}
-    common_args.dataset_args.variant = 'deit3_rrc'# deit3 Jort added this would be for the train class to work for tiny deit3
+    #.dataset_args.variant = 'deit3_rrc' 
     common_args.mixup_alpha = None #0.8
     common_args.cutmix_alpha = None #1.0
     common_args.mixup_smoothing = 0.1
@@ -128,16 +128,20 @@ def main():
     # expert_split_args.model_args.expert_size = 24
     # expert_split_args.model_args.expert_size = 12
     expert_split_args.model_args.expert_size = 8 #6
-    expert_split_args.model_args.experts_class = 'execute_all'
+    expert_split_args.model_args.experts_class = 'custom_kernel' #'execute_all'
     expert_split_args.activation = 'relu'
     final_path_save = [
         'relu_moe_0',
+        'relu_moe_0.1',
         'relu_moe_0.01',
+        'relu_moe_0.001',
         'relu_moe_0.0001',
     ]
     path_file = [
         '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.1/final.pth',
         '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.01/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.001/final.pth',
         '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.0001/final.pth',
     ]
 
@@ -160,80 +164,6 @@ def main():
     exp_names.append(exp_name)
     base_split_exp_names.append(exp_names[-1])
     display_names.append(f'DSTI expert split')
-
-    # ════════════════════════ dsti router training model settings ════════════════════════ #
-
-    # dsti_gpus_per_task = 4
-    dsti_gpus_per_task = 1
-
-    dsti_routing_args = deepcopy(common_args)
-    dsti_routing_args.model_class = 'dsti_router'
-    dsti_routing_args.router_loss_type = 'mse' #'huber' #'mse'
-    dsti_routing_args.epochs = 1
-    # dsti_routing_args.epochs = 0.1
-    # dsti_routing_args.batch_size = 256
-    dsti_routing_args.batch_size = 128
-    # dsti_routing_args.batch_size = 64
-    dsti_routing_args.optimizer_args.lr = 0.001
-    dsti_routing_args.model_args = {}
-    dsti_routing_args.model_args.depth = 2
-    dsti_routing_args.model_args.width = 128
-    # dsti_routing_args.model_args.width = 32
-    # dsti_routing_args.model_args.width = 16
-    # dsti_routing_args.model_args.activation = 'gelu'
-    dsti_routing_args.model_args.activation = 'relu'
-    # dsti_routing_args.model_args.activation = 'tanh'
-    dsti_routing_args.model_args.output_activation = 'abs'
-    # dsti_routing_args.model_args.output_activation = 'relu'
-    # dsti_routing_args.model_args.output_activation = 'identity'
-    dsti_routing_args.dsti_router_labels_layer = 'output'
-    dsti_routing_args.dsti_router_labels_norm = 2
-    dsti_routing_args.dsti_tau_to_eval =  [0.9, 0.925, 0.93, 0.935, 0.94, 0.945,0.95, 0.96, 0.97, 0.98, 0.99, 0.995, 0.999, 0.9999, 1.0]
-    #[0.5, 0.8, 1.0]
-    # [0.9, 0.925, 0.93, 0.935, 0.94, 0.945,0.95,
-    #                                       0.96, 0.97, 0.98, 0.99, 0.995, 0.999, 0.9999, 1.0]
-                                           
-    # [0.5, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.925, 0.95,
-    #                                       0.96, 0.97, 0.98, 0.99, 0.995, 0.999, 0.9999, 1.0]
-    
-    dsti_routing_args.dsti_expert_selection_mode = 'dynk_max'
-    dsti_routing_args.eval_points = 4
-    # dsti_routing_args.eval_points = 0
-    dsti_routing_args.mixed_precision = None
-    #dsti_routing_args.mixed_precision = 'bf16'
-    dsti_routing_args.activation = 'relu'
-    dsti_routing_args.include_sparsity = True
-
-    # # ════════════════════════ dsti router training ════════════════════════ #
-    # Jort HEre
-    # base_routed_dsti_exp_names = []
-    # for base_on_exp_name in base_split_exp_names:
-    #     for exp_id in exp_ids:
-    #         args = deepcopy(dsti_routing_args)
-    #         args.exp_id = exp_id
-    #         args.base_on = base_on_exp_name
-    #         exp_name, run_name = generate_run_name(args)
-    #         base_run_name = f'{base_on_exp_name}_{exp_id}'
-    #         executor.update_parameters(slurm_additional_parameters={})
-    #         job = submit_job(executor, dsti_train_routers, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
-    #         jobs.append(job)
-    #         run_to_job_map[run_name] = job
-    #     exp_names.append(exp_name)
-    #     base_routed_dsti_exp_names.append(exp_names[-1])
-    #     display_names.append(f'DSTI')
-
-    # ═════════════════════════════════════════════════════════ #
-
-    print(f"Exp names: {exp_names}")
-    print(f"Display names: {display_names}")
-    print(f"SLURM JIDs: {[job.job_id for job in jobs]}")
-
-    # # ════════════════════════ plot cost vs acc ════════════════════════ #
-
-    # plot_args = get_default_cost_plot_args()
-
-    out_dir_name = f"vit_{common_args.dataset}_wip_hoyer"
-    output_dir = Path(os.environ["RESULTS_DIR"]) / out_dir_name
 
 
 if __name__ == '__main__':

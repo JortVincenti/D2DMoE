@@ -10,7 +10,6 @@ import dist
 from architectures.basic_var import AdaLNBeforeHead, AdaLNSelfAttn
 from architectures.helpers import gumbel_softmax_with_rng, sample_with_top_k_top_p_
 from architectures.vqvae import VQVAE, VectorQuantizer2
-import matplotlib.pyplot as plt
 import numpy as np
 import pickle
 
@@ -130,14 +129,11 @@ class VAR(nn.Module):
     def autoregressive_infer_cfg(
         self, B: int, label_B: Optional[Union[int, torch.LongTensor]],
         g_seed: Optional[int] = None, cfg=1.5, top_k=0, top_p=0.0,
-        more_smooth=False, plotting_PCA=False
+        more_smooth=False, plotting_PCA=False, rng=0
     ) -> torch.Tensor:
         """
         Inference method for autoregressive mode, collecting activations per scale.
         """
-        if g_seed is None: rng = None
-        else: self.rng.manual_seed(g_seed); rng = self.rng
-
         if label_B is None:
             label_B = torch.multinomial(self.uniform_prob, num_samples=B, replacement=True, generator=rng).reshape(B)
         elif isinstance(label_B, int):

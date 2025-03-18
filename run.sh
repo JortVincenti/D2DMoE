@@ -14,7 +14,7 @@ module load Anaconda3/2023.07-2
 
 cd $HOME/D2DMoE/
 
-# Empty the logs folder
+# # Empty the logs folder
 # if [ -d "shared/results/effbench_logs" ]; then
 #     rm -rf shared/results/effbench_logs/*
 #     rm -rf shared/results/effbench_logs/.*

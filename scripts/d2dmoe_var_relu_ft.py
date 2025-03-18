@@ -54,7 +54,7 @@ def main():
     # partition = 'rtx3080'
     # partition = 'batch'
 
-    timeout = 60 * 24
+    timeout = 60 * 20
     # timeout = 60 * 24 * 2
 
     gpus_per_task = 1
@@ -196,7 +196,7 @@ def main():
     sparsity_enforcement_args.dsti_enforce_mode = 'relu_hoyer'
     sparsity_enforcement_args.dsti_clamp_displacement = -10.0
     # sparsity_enforcement_args.dsti_enforce_weight = 5e-1
-    dsti_enforce_weight = [1e-1] #, 1e-3, 1e-4] #[0, 2e-1, 1e-1, 5e-2, 1e-2, 5e-3, 1e-3, 2e-4] 
+    dsti_enforce_weight = [0, 1e-1, 1e-2, 1e-3, 1e-4] #, 1e-3, 1e-4] #[0, 2e-1, 1e-1, 5e-2, 1e-2, 5e-3, 1e-3, 2e-4] 
     # sparsity_enforcement_args.dsti_enforce_weight = 1e-1
     # sparsity_enforcement_args.dsti_enforce_weight = 5e-2
     # sparsity_enforcement_args.dsti_enforce_weight = 1e-2
@@ -227,7 +227,7 @@ def main():
     sparsity_enforcement_args.final_path_save = 'relu_sparse_ft'
     sparsity_enforcement_args.mixed_precision = None
     #sparsity_enforcement_args.mixed_precision = 'bf16'
-    sparsity_enforcement_args.path_file_ft = 'shared/results/effbench_runs/relu_sparse_ft_0.0001/final.pth'
+    sparsity_enforcement_args.path_file_ft = 'shared/results/effbench_runs/relu_sparse_ft_0/final.pth'
 
     # # ════════════════════════ activation sparsity enforcement ════════════════════════ #
     # Jort HEre

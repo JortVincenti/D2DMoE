@@ -57,19 +57,15 @@ def setup_model(args, tc):
     tc.model, tc.replaced_modules_list = replace_with_moes(base_model, **args.model_args,
                                                         module_filter_contition=dsti_mlp_filter_condition)
     print('done replace_with_moes', tc.replaced_modules_list)
-    init_fun = INIT_NAME_MAP[args.init_fun]
-    
-    if init_fun is not None:
-        init_fun(tc.model)
-    tc.model = tc.accelerator.prepare(tc.model)
+
+    #tc.model = tc.accelerator.prepare(tc.model)
 
 
 def param_split(tc):
-    unwrapped_model = tc.accelerator.unwrap_model(tc.model)
+    #unwrapped_model = tc.accelerator.unwrap_model(tc.model)
     print('tc.replaced_modules_list', tc.replaced_modules_list)
-    if tc.state.current_batch == 0:
-        split_original_parameters(tc.orig_model, unwrapped_model, tc.replaced_modules_list)
-        tc.state.current_batch = max(tc.last_batch + 1, 1)
+    split_original_parameters(tc.orig_model, tc.model, tc.replaced_modules_list)
+
     del tc.orig_model
 
 
@@ -102,26 +98,15 @@ def train(args):
     args: arg_util.Args = arg_util.init_dist_and_get_args(args)
     logging.info('Configured logging')
     tc = ParamSplitContext()
-    setup_accelerator(args, tc)
-    setup_files_and_logging(args, tc)
+    # setup_accelerator(args, tc)
+    # setup_files_and_logging(args, tc)
     setup_model(args, tc)
-    setup_state(tc)
-    setup_data(args, tc)
-    setup_optimization(args, tc)
+    # setup_state(tc)
+    # setup_data(args, tc)
+    # setup_optimization(args, tc)
 
     param_split(tc)
 
-    # Build the trainer
-    tc.trainer = VARTrainer(
-        device=args.device, # correct
-        patch_nums=args.patch_nums, # correct
-        resos=args.resos, # correct
-        vae_local=tc.model_vae,
-        var_wo_ddp=tc.model, # correct
-        var=tc.model, # correct
-        var_opt=tc.optimizer, # correct
-        label_smooth=args.ls # correct
-    )
     final_eval(args, tc)
 
 

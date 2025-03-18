@@ -29,7 +29,7 @@ except ImportError:
         if attn_mask is not None: attn.add_(attn_mask)
         return (F.dropout(attn.softmax(dim=-1), p=dropout_p, inplace=True) if dropout_p > 0 else attn.softmax(dim=-1)) @ value
 
-
+print_first_ffn = True
 class FFN(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, drop=0., fused_if_available=True):
         super().__init__()
@@ -51,6 +51,16 @@ class FFN(nn.Module):
         else:
             #torch.set_printoptions(threshold=100, edgeitems=10)
             #print('output FFN', self.drop(self.fc2( self.act(self.fc1(x)))))
+            # global print_first_ffn
+            # if print_first_ffn:
+            #     print('output fc1', self.fc1(x).sum())
+            #     print('output activation', self.act(self.fc1(x)).sum())
+            #     print('output fc2', self.fc2( self.act(self.fc1(x))).sum())
+            #     print('SUm of biases fc1 = {:.20f}'.format( self.fc1.bias.sum().item()))
+            #     print('SUm of biases fc2 = {:.20f}'.format( self.fc2.bias.sum().item()))
+            #     print("fc1 weight sum = {:.20f}".format(self.fc1.weight.sum().item()))
+            #     print("fc2 weight sum = {:.20f}".format(self.fc2.weight.sum().item()))
+            #     print_first_ffn = False
             return self.drop(self.fc2( self.act(self.fc1(x)) ))
     
     def extra_repr(self) -> str:
@@ -135,7 +145,7 @@ class SelfAttention(nn.Module):
     def extra_repr(self) -> str:
         return f'using_flash={self.using_flash}, using_xform={self.using_xform}, attn_l2_norm={self.attn_l2_norm}'
 
-
+print_first = True
 class AdaLNSelfAttn(nn.Module):
     def __init__(
         self, block_idx, last_drop_p, embed_dim, cond_dim, shared_aln: bool, norm_layer,
@@ -160,9 +170,11 @@ class AdaLNSelfAttn(nn.Module):
         self.fused_add_norm_fn = None
     
     # NOTE: attn_bias is None during inference because kv cache is enabled
+    
     def forward(self, x, cond_BD, attn_bias):   # C: embed_dim, D: cond_dim
         # print('x:', x.sum())
         # print('cond_BD:', cond_BD.sum())
+        #global print_first
         if self.shared_aln:
             gamma1, gamma2, scale1, scale2, shift1, shift2 = (self.ada_gss + cond_BD).unbind(2) # 116C + B16C =unbind(2)=> 6 B1C
         else:
@@ -191,10 +203,17 @@ class AdaLNSelfAttn(nn.Module):
         # attn_input.mul_(scale1.add(1))
         # attn_input.add_(shift1)
         # print("attn_input:", attn_input.sum())
+
         x = x + self.drop_path(self.attn( self.ln_wo_grad(x).mul(scale1.add(1)).add_(shift1), attn_bias=attn_bias ).mul_(gamma1))
-        # print("x (post-attn):", x.sum())
+        # if print_first:
+        #     print("x (post-attn):", x.sum())
+        #     print(self.ffn)
+        #     temp = self.ffn(self.ln_wo_grad(x).mul(scale2.add(1)).clone().add(shift2))
+        #     print('output ffn', temp.sum())
         x = x + self.drop_path(self.ffn( self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2) ).mul(gamma2)) # this mul(gamma2) cannot be in-placed when FusedMLP is used
-        # print("x (post-ffn):", x.sum())
+        # if print_first:
+        #     #print("x (post-ffn):", x.sum())
+        #     print_first = False
         
         return x
     

@@ -88,6 +88,7 @@ class MoeficationMoE(MoELayer):
             norm_thresholds = max_norms * (1.0 - self.tau)
             routing_tensor = torch.zeros_like(predicted_expert_norms)
             routing_tensor[predicted_expert_norms >= norm_thresholds] = 1.0
+            self.routing_mask = routing_tensor.sum(dim=-1)
         elif self.forward_mode == 'oracle':            
             # Save original shape (ideally [2, 1, 1024])
             orig_size = x.size()  
@@ -96,10 +97,13 @@ class MoeficationMoE(MoELayer):
             x = x.view(-1, x.size(-1))
             assert x.dim() == 2, f'{x.size()=}'
             x = x.unsqueeze(0)
+            
+            if isinstance(self.experts, CustomKernelExperts):
+                x = self.experts.forward_without_routing(x)
+            else:
+                for layers in self.experts.layers:
+                    x = layers(x)
 
-            for i, layer in enumerate(self.experts.layers):
-                x = layer(x)
-        
             # Suppose B = input.size(0), T = input.size(1)
             e = x.size(0)
             B = orig_size[0]
@@ -113,7 +117,7 @@ class MoeficationMoE(MoELayer):
             new_routing[norms >= norm_thresholds] = 1.0
             new_routing = new_routing.transpose(0, 1) 
             routing_tensor = new_routing
-            self.routing_mask = new_routing.sum(dim=-1)
+            self.routing_mask = new_routing.sum(dim=0)
         else:
             raise ValueError(f'Unsupported forward_mode: {self.forward_mode}')
 
@@ -124,7 +128,7 @@ class MoeficationMoE(MoELayer):
         # print('max_norms[0]', max_norms[0])
         # print('routing_tensor', routing_tensor.shape)
         return routing_tensor
-
+    
     def forward(self, x):
         # x is of size (batch_size, sequence_length, dim)
         routing_tensor = self.gate(x)
@@ -144,7 +148,7 @@ class MoeficationMoE(MoELayer):
         if self.add_residual_connection:
             out = out + x
         out = out.view(orig_size)
-        #print('final out', out.shape)
+        #print('Bias Last', self.last_bias.sum())
         return out, {self.name: (routing_tensor,)}
 
 
@@ -339,17 +343,123 @@ def param_clustering_split(ffn, moe_layer):
             filled_neuron_counts = [0 for _ in range(num_experts)]
             for neuron_index, expert_index in enumerate(labels):
                 expert_neuron_index = filled_neuron_counts[expert_index]
-                moe_layer.experts.w1[expert_index, :, expert_neuron_index].copy_(ffn[0].weight[neuron_index])
+                moe_layer.experts.w1[expert_index, :, expert_neuron_index].copy_(ffn.fc1.weight[neuron_index])
                 if moe_layer.bias:
-                    moe_layer.experts.b1[expert_index, expert_neuron_index].copy_(ffn[0].bias[neuron_index])
-                moe_layer.experts.w2[expert_index, expert_neuron_index].copy_(ffn[3].weight[:, neuron_index])
+                    moe_layer.experts.b1[expert_index, expert_neuron_index].copy_(ffn.fc1.bias[neuron_index])
+                moe_layer.experts.w2[expert_index, expert_neuron_index].copy_(ffn.fc2.weight[:, neuron_index])
                 filled_neuron_counts[expert_index] += 1
             # copy the last layer bias
             if moe_layer.bias:
-                moe_layer.last_bias.copy_(ffn[3].bias)
+                moe_layer.last_bias.copy_(ffn.fc2.bias)
+
+            # print('Types')
+            # print('ffn.fc1.bias', ffn.fc1.bias.dtype)
+            # print('ffn.fc1.weight', ffn.fc1.weight.dtype)
+            # print('ffn.fc2.bias', ffn.fc2.bias.dtype)
+            # print('ffn.fc2.weight', ffn.fc2.weight.dtype)
+            # print('-'*100)
+            # print('oe_layer.experts.w1[expert_index, :, expert_neuron_index]', moe_layer.experts.w1[expert_index, :, expert_neuron_index].dtype)
+            # print('moe_layer.experts.b1[expert_index, expert_neuron_index]', moe_layer.experts.b1[expert_index, expert_neuron_index].dtype)
+            # print('moe_layer.experts.w2[expert_index, expert_neuron_index].', moe_layer.experts.w2[expert_index, expert_neuron_index].dtype)
+            # print('moe_layer.last_bias', moe_layer.last_bias.dtype)
+
+            
+            
     else:
         # TODO
         raise NotImplementedError('Other variants not handled yet')
+
+
+# def param_clustering_split(ffn, moe_layer):
+#     """
+#     This version does NOT do any clustering. Instead, it partitions the
+#     FFN's hidden dimension contiguously across num_experts. The result:
+#     if you route to all experts, the output is exactly the same as the
+#     original ffn.
+
+#     ffn is expected to have two layers:
+#       w1: first linear  (in_features -> out_features)
+#       w2: second linear (out_features -> ???)
+#     moe_layer is expected to have:
+#       moe_layer.num_experts = number of experts
+#       moe_layer.experts = ExecuteAllExperts with depth == 2
+#       (like in your snippet)
+#     """
+
+#     num_experts = moe_layer.num_experts
+
+#     # 1) Identify the first & second linear layers in `ffn`
+#     if isinstance(ffn, nn.Sequential):
+#         # Suppose ffn[0] is the first linear, ffn[3] is the second
+#         w1 = ffn[0]  # nn.Linear
+#         w2 = ffn[3]  # nn.Linear
+#     elif hasattr(ffn, "c_fc") and hasattr(ffn, "c_proj"):  # GPT style
+#         w1 = ffn.c_fc   # first linear
+#         w2 = ffn.c_proj # second linear
+#     elif hasattr(ffn, "intermediate") and hasattr(ffn, "output"):  # BERT style
+#         w1 = ffn.intermediate.dense
+#         w2 = ffn.output.dense
+#     elif hasattr(ffn, "fc1") and hasattr(ffn, "fc2"):      # Basic FFN
+#         w1 = ffn.fc1
+#         w2 = ffn.fc2
+#     else:
+#         raise ValueError(f'Unsupported ffn type: {type(ffn)}')
+
+#     # 2) Set up dimensions & chunking
+#     hidden_dim = w1.in_features
+#     d_ff = w1.out_features       # total # of neurons in the first linear
+#     expert_size = d_ff // num_experts
+#     # We expect (d_ff % num_experts == 0) for a perfect split
+
+#     # Instead of K-Means, we do a simple chunk-based assignment:
+#     # e.g. if d_ff=1024, num_experts=16 => each chunk is size 64
+#     # chunk 0 => neurons [0..63], chunk 1 => [64..127], etc.
+#     labels = np.repeat(np.arange(num_experts), expert_size)  # shape = (d_ff,)
+
+#     if isinstance(moe_layer.experts, ExecuteAllExperts):
+#         assert moe_layer.experts.depth == 2, "We only handle 2-layer MoE modules"
+#         with torch.no_grad():
+#             filled_neuron_counts = [0 for _ in range(num_experts)]
+
+#             # Copy row i of w1 -> row in the assigned expert
+#             for neuron_index, expert_index in enumerate(labels):
+#                 expert_neuron_index = filled_neuron_counts[expert_index]
+
+#                 # Move w1.weight[i,:] -> first layer of this expert
+#                 # shape of moe_layer.experts.layers[0].w is [num_experts, in_features, expert_size]
+#                 # so we do   [expert_index, :, expert_neuron_index]
+#                 moe_layer.experts.layers[0].w[expert_index, :, expert_neuron_index].copy_(
+#                     w1.weight[neuron_index]
+#                 )
+#                 if moe_layer.bias:
+#                     moe_layer.experts.layers[0].b[expert_index, :, expert_neuron_index].copy_(
+#                         w1.bias[neuron_index]
+#                     )
+
+#                 # Move w2.weight[:, i] -> second layer of this expert
+#                 # shape of moe_layer.experts.layers[1].w is [num_experts, expert_size, out_dim]
+#                 # but the snippet in your code used shape [num_experts, expert_size], or [num_experts, expert_size, ???]
+#                 # We'll match your snippet: layers[1].w[expert_index, expert_neuron_index].copy_(...)
+#                 # meaning it expects w2.weight has shape [out_dim, d_ff].
+#                 # The original snippet does: w2.weight[:, neuron_index]
+#                 # => we place that in [expert_index, expert_neuron_index].
+#                 moe_layer.experts.layers[1].w[expert_index, expert_neuron_index].copy_(
+#                     w2.weight[:, neuron_index]
+#                 )
+
+#                 filled_neuron_counts[expert_index] += 1
+
+#             # copy the last layer bias if present
+#             if moe_layer.bias:
+#                 moe_layer.last_bias.copy_(w2.bias)
+#     else:
+#         raise NotImplementedError("Only handle ExecuteAllExperts with depth=2 for now")
+
+#     # Now, if the MoE forward pass sums across ALL experts, the
+#     # result is identical to old ffn(x) => w2( w1(x) ) as long as
+#     # all sub-layers are used + no gating differences + no additional
+#     # normalization or transformations are introduced.
+
 
 
 def split_original_parameters(original_model: nn.Module, moe_model: nn.Module, replaced_module_names: List[str]):
