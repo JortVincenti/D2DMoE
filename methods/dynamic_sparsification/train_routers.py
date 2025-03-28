@@ -49,6 +49,16 @@ import ast
 import matplotlib.pyplot as plt
 from PIL import Image
 import time
+from torch._C._profiler import ProfilerActivity
+import torch
+from torch.profiler import profile, record_function, ProfilerActivity, tensorboard_trace_handler
+import torch
+import random
+import numpy as np
+import os
+import shutil
+from PIL import Image
+
 
 class RouterTrainingContext(TrainingContext):
     moe_modules: Dict[str, nn.Module] = None
@@ -59,6 +69,7 @@ class RouterTrainingContext(TrainingContext):
     router_criterion_type: Type = None
     router_criterion: Callable = None
     initial_model = None
+
 
 
 def make_image(var, args):
@@ -108,11 +119,6 @@ def setup_model(args, tc):
     tc.initial_model = copy.deepcopy(model)
     #_ , debug_data = make_image(tc.initial_model, args)
 
-    initial_weights = {}
-    for name, param in model.named_parameters():
-        initial_weights[name] = param.clone()
-
-
     if args.activation in ['gelu', 'relu']:
         init_path = Path(args.path_file_ft)
         final_state = torch.load(init_path, map_location=args.device)
@@ -127,27 +133,22 @@ def setup_model(args, tc):
         new_state_dict = OrderedDict((k.replace("module.", ""), v) for k, v in state_dict.items())
         model.load_state_dict(new_state_dict)
 
-    final_path = Path(args.path_file_moe)
-    final_state = torch.load(final_path, map_location=args.device)
-    state_dict = final_state['model_state']
-    model_arg = final_state['args'].model_args
-    model, _ = replace_with_moes(model, **model_arg, module_filter_contition=dsti_mlp_filter_condition)
-    model = model.to(args.device)
+        final_path = Path(args.path_file_moe)
+        final_state = torch.load(final_path, map_location=args.device)
+        state_dict = final_state['model_state']
+        model_arg = final_state['args'].model_args
+        model, _ = replace_with_moes(model, **model_arg, module_filter_contition=dsti_mlp_filter_condition)
+        model = model.to(args.device)
 
-    model.load_state_dict(state_dict)
-    tc.moe_modules = add_routers(model, args.model_args)
+        model.load_state_dict(state_dict)
+        tc.moe_modules = add_routers(model, args.model_args)
 
     if args.use_router:
         final_router_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/' + args.final_path_save + "_router" + "/final.pth")
-        #print('final_router_path', final_router_path)
-        if final_router_path.exists():
-            final_state = torch.load(final_router_path, map_location=args.device)
-            state_dict = final_state['model_state']
-            model_arg = final_state['args'].model_args
-            model.load_state_dict(state_dict)
-
-    #print('model', model)
-    #print('final_router_path.exists()', final_router_path.exists())
+        final_state = torch.load(final_router_path, map_location=args.device)
+        state_dict = final_state['model_state']
+        model_arg = final_state['args'].model_args
+        model.load_state_dict(state_dict)
     
     tc.model = tc.accelerator.prepare(model)
 
@@ -252,6 +253,7 @@ def setup_model(args, tc):
 
             num_total_samples = len(all_labels)
             num_batches = num_total_samples // B
+            warmup_batches = num_batches // 2
 
             final_flops = 0
             final_mean_flops = 0
@@ -261,77 +263,54 @@ def setup_model(args, tc):
             recon_samples = {}      # dict mapping class_idx -> image (tensor or PIL)
             recon_var_samples = {}  # dict mapping class_idx -> image (tensor or PIL)
 
-            for batch_idx in range(num_batches):
-                # Create label_B for the batch: a combination of class indices.
-                batch_labels = all_labels[batch_idx * B : (batch_idx + 1) * B]
-                label_B = torch.tensor(batch_labels, device='cuda')
-                
-                # Autoregressive sampling with batch size B.
-                with torch.no_grad():
-                    with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):
+            output_dir = f'CUDA_Profile_tensorboard/{args.final_path_save}'
+            os.makedirs(output_dir, exist_ok=True)
 
-                        recon_B3HW, mean_flops, total_flops, time_taken = autoregressive_infer_cfg_with_expert_plot(
-                            tc=tc, B=B, label_B=label_B, cfg=cfg, top_k=top_k, top_p=top_p,
-                            rng=rng, more_smooth=more_smooth, tau=tau, debug_data=None,
-                            compare_dicts=False, type_of_model=type_of_model, final_path_save=None, forward_mode=forward_mode
-                        )
-
-                        batch_time += time_taken
+            with profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                schedule=torch.profiler.schedule(
+                    skip_first=5,
+                    wait=2,
+                    warmup=2,
+                    active=1,
+                    repeat=1
+                    ),
+                on_trace_ready=tensorboard_trace_handler(output_dir),
+                record_shapes=True,
+                profile_memory=True
+            ) as prof:
+                for batch_idx in range(num_batches):
+                    # Create label_B for the batch: a combination of class indices.
+                    batch_labels = all_labels[batch_idx * B : (batch_idx + 1) * B]
+                    label_B = torch.tensor(batch_labels, device='cuda')
                     
-                        if args.final_path_save =='base_data_moe' and tau == 1.0:
-                            torch.cuda.synchronize()
-                            start_time = time.perf_counter()
-                            recon_B3HW_var, _ = tc.initial_model.autoregressive_infer_cfg(B=B, label_B=label_B, cfg=cfg, top_k=top_k, top_p=top_p, g_seed=seed, more_smooth=more_smooth, plotting_PCA=False, rng=rng_2)
-                            # recon_B3HW_var, mean_flops, total_flops = autoregressive_infer_cfg_test(
-                            # tc=tc, B=B, label_B=label_B, cfg=cfg, top_k=top_k, top_p=top_p,
-                            # rng=rng, more_smooth=more_smooth, tau=tau, debug_data=None,
-                            # compare_dicts=False, type_of_model=type_of_model, final_path_save=None
-                            # )
-                            end_time = time.perf_counter()
-                            batch_time_base = batch_time_base + (end_time - start_time)
+                    # Autoregressive sampling with batch size B.
+                    with torch.no_grad():
+                        with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):
+                            if args.final_path_save =='base_data_moe' and isinstance(tau, float) and tau == 1.0:
+                                recon_B3HW_var, _, = tc.initial_model.autoregressive_infer_cfg(B=B, label_B=label_B, cfg=cfg, top_k=top_k, 
+                                top_p=top_p, g_seed=seed, more_smooth=more_smooth, plotting_PCA=False, rng=rng_2)
+                            else:
+                                if args.dsti_tau_as_list:
+                                    recon_B3HW, mean_flops, total_flops = autoregressive_infer_cfg_with_expert_plot(
+                                        tc=tc, B=B, label_B=label_B, cfg=cfg, top_k=top_k, top_p=top_p,
+                                        rng=rng, more_smooth=more_smooth, tau=1.0, debug_data=None,
+                                        compare_dicts=False, type_of_model=type_of_model, final_path_save=None, forward_mode=forward_mode,
+                                        taus = tau
+                                    )
+                                else:
+                                    recon_B3HW, mean_flops, total_flops = autoregressive_infer_cfg_with_expert_plot(
+                                        tc=tc, B=B, label_B=label_B, cfg=cfg, top_k=top_k, top_p=top_p,
+                                        rng=rng, more_smooth=more_smooth, tau=tau, debug_data=None,
+                                        compare_dicts=False, type_of_model=type_of_model, final_path_save=None, forward_mode=forward_mode,
+                                        taus = False
+                                    )
+                                final_mean_flops += mean_flops
+                                final_flops += total_flops
+                    torch.cuda.synchronize()
+                    prof.step()
 
-
-                        final_mean_flops += mean_flops
-                        final_flops += total_flops
-
-                    for i in range(B):
-                        img_tensor = recon_B3HW[i].detach().cpu()
-                        img_array = (img_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-                        img_pil = Image.fromarray(img_array)
-                        global_idx = batch_idx * B + i
-                        filename = f"class_{batch_labels[i]:04d}_{global_idx:05d}.png"
-                        img_pil.save(os.path.join(sample_folder, filename))
-
-                        cls_label = batch_labels[i]
-                        # Only store the first 25 unique classes
-                        if cls_label not in recon_samples and len(recon_samples) < 25:
-                            recon_samples[cls_label] = img_array
-
-                    # 2) If we have exactly 25 stored images in recon_samples, produce a 5×5 grid
-                    if len(recon_samples) == 25 and 1001 not in recon_samples:
-                        chosen_moe_classes = sorted(recon_samples.keys())[:25]
-                        num_moe = len(chosen_moe_classes)  # should be 25
-                        rows_moe = 5
-                        cols_moe = 5
-                        fig_moe, axes_moe = plt.subplots(rows_moe, cols_moe, figsize=(10, 10))
-
-                        plt.subplots_adjust(wspace=0, hspace=0)
-
-                        for idx, cls_label in enumerate(chosen_moe_classes):
-                            row = idx // cols_moe
-                            col = idx % cols_moe
-                            img_np = recon_samples[cls_label]  # shape [H, W, 3]
-                            axes_moe[row, col].imshow(img_np, interpolation='nearest')
-                            axes_moe[row, col].axis("off")
-
-                        fig_moe.savefig(f"Images/{args.final_path_save}_with_router_{args.use_router}_tau_{tau}.png", bbox_inches="tight", pad_inches=0)
-                        plt.close(fig_moe)
-                        # Mark that we've already saved so we don't keep regenerating
-                        recon_samples[1001] = 'end'
-
-                    # 3) If final_path_save is base_data_moe AND tau == 1.0, we also handle recon_B3HW_var:
                     if args.final_path_save =='base_data_moe' and tau == 1.0:
-
                         for i in range(B):
                             img_tensor = recon_B3HW_var[i].detach().cpu()
                             img_array = (img_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
@@ -339,64 +318,21 @@ def setup_model(args, tc):
                             global_idx = batch_idx * B + i
                             filename = f"class_{batch_labels[i]:04d}_{global_idx:05d}.png"
                             img_pil.save(os.path.join(sample_folder_var, filename))
-
-                            cls_label = batch_labels[i]
-                            if cls_label not in recon_var_samples and len(recon_var_samples) < 25:
-                                recon_var_samples[cls_label] = img_array
-
-                        # Build a 5×5 grid for the first 25 classes in recon_var_samples
-                        if len(recon_var_samples) == 25 and 1001 not in recon_var_samples:
-                            chosen_var_classes = sorted(recon_var_samples.keys())[:25]
-                            rows_var = 5
-                            cols_var = 5
-                            fig_var, axes_var = plt.subplots(rows_var, cols_var, figsize=(10, 10))
-                            plt.subplots_adjust(wspace=0, hspace=0)
-
-                            for idx, cls_label in enumerate(chosen_var_classes):
-                                row = idx // cols_var
-                                col = idx % cols_var
-                                img_np = recon_var_samples[cls_label]
-                                axes_var[row, col].imshow(img_np, interpolation='nearest')
-                                axes_var[row, col].axis("off")
-
-                            fig_var.savefig("Images/var_baseline_grid.png", bbox_inches="tight", pad_inches=0)
-                            plt.close(fig_var)
-                            recon_var_samples[1001] = 'end'
-
-                            
-
-            #print(f"Done! Images saved to: {sample_folder}")
-            final_flops = final_flops/(num_batches*2*B)
-            final_mean_flops = final_mean_flops/num_batches
-            # Now calculate_metrics:
-            input2 = None
-            fid_statistics_file = 'adm_in256_stats.npz'
-
-            metrics_dict = torch_fidelity.calculate_metrics(
-                input1=sample_folder,
-                input2=input2,
-                fid_statistics_file=fid_statistics_file,
-                cuda=True,
-                isc=True,
-                fid=True,
-                kid=False,
-                prc=False,
-                verbose=False,
-            )
-            print("*"*100)
-            print(f'Final Fid for {tau}', args.final_path_save)
-            print(metrics_dict)
-            print('Total Flops per sample', final_flops)
-            print('Average Flops per sample', final_mean_flops)
-            print(f"Batch generation took {batch_time:.6f} seconds")
-            print("*"*100)
-            shutil.rmtree(sample_folder)
+                    else:
+                        for i in range(B):
+                            img_tensor = recon_B3HW[i].detach().cpu()
+                            img_array = (img_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+                            img_pil = Image.fromarray(img_array)
+                            global_idx = batch_idx * B + i
+                            filename = f"class_{batch_labels[i]:04d}_{global_idx:05d}.png"
+                            img_pil.save(os.path.join(sample_folder, filename))
 
 
             if args.final_path_save =='base_data_moe' and tau == 1.0:
+                fid_statistics_file = 'adm_in256_stats.npz'
                 metrics_dict = torch_fidelity.calculate_metrics(
                     input1=sample_folder_var,
-                    input2=input2,
+                    input2=None,
                     fid_statistics_file=fid_statistics_file,
                     cuda=True,
                     isc=True,
@@ -408,12 +344,40 @@ def setup_model(args, tc):
                 print("*"*100)
                 print(f'Final Fid for {tau} with base VAR')
                 print(metrics_dict)
+                # print('Total Flops per sample', final_flops)
+                # print('Average Flops per sample', final_mean_flops)
+                #print('batch_time_base', batch_time_base)
+                print("*"*100)
+                shutil.rmtree(sample_folder_var)                
+            else:             
+                #print(f"Done! Images saved to: {sample_folder}")
+                final_flops = final_flops/(num_batches*2*B)
+                final_mean_flops = final_mean_flops/num_batches
+                # Now calculate_metrics:
+                input2 = None
+                fid_statistics_file = 'adm_in256_stats.npz'
+
+                metrics_dict = torch_fidelity.calculate_metrics(
+                    input1=sample_folder,
+                    input2=input2,
+                    fid_statistics_file=fid_statistics_file,
+                    cuda=True,
+                    isc=True,
+                    fid=True,
+                    kid=False,
+                    prc=False,
+                    verbose=False,
+                )
+                print("*"*100)
+                print(f'Final Fid for {tau}', args.final_path_save)
+                print(metrics_dict)
                 print('Total Flops per sample', final_flops)
                 print('Average Flops per sample', final_mean_flops)
-                print('batch_time_base', batch_time_base)
+                # print(f"Batch generation took {batch_time:.6f} seconds")
                 print("*"*100)
-                shutil.rmtree(sample_folder_var)
-        
+                shutil.rmtree(sample_folder)
+
+
     if args.debug:
         raise ValueError("args.debug is true therefore stopping here.")
 
@@ -540,13 +504,13 @@ def training_loop(args, tc):
             x_BLCv_wo_first_l: Ten = tc.model_vae.quantize.idxBl_to_var_input(gt_idx_Bl)
             tc.model(label_B, x_BLCv_wo_first_l)
 
+
         router_losses = []
         for moe_name, moe in tc.moe_modules.items():
             router = moe.router
             input = tc.saved_inputs[moe_name][0]
             captured_output_norm = tc.saved_output_norms[tc.captured_layer_name_map[moe_name]]
-            # print('captured_output_norm:', captured_output_norm)
-            # print('shape', captured_output_norm.shape)
+
             with torch.no_grad():
                 # captured_output_norm size is (num_experts, batch_size * seq_len)
                 router_label = captured_output_norm.view(captured_output_norm.size(0), input.size(0),
@@ -554,29 +518,11 @@ def training_loop(args, tc):
                 router_label = router_label.permute(1, 2, 0).detach()
             with tc.accelerator.autocast():
                 router_output = router(input)
+
                 router_loss = tc.router_criterion(router_output, router_label)
-            # print('router_output:', router_output)
-            # print('router_label:', router_label)
-            # print(f'loss: {router_loss}')
-            
-            # Calculate the number of zeros and the total number of elements
-            num_zeros_output = (router_output == 0).sum().item()
-            total_elements_output = router_output.numel()
-            percent_zeros_output = (num_zeros_output / total_elements_output) * 100
 
-            num_zeros_label = (router_label == 0).sum().item()
-            total_elements_label = router_label.numel()
-            percent_zeros_label = (num_zeros_label / total_elements_label) * 100
-
-
-            # print(f"Input stats: mean={input.mean().item()}, std={input.std().item()}, min={input.min().item()}, max={input.max().item()}")
-            # print(f"Router output stats: mean={router_output.mean().item()}, std={router_output.std().item()}, min={router_output.min().item()}, max={router_output.max().item()}")
-            # print(f"Router label stats: mean={router_label.mean().item()}, std={router_label.std().item()}, min={router_label.min().item()}, max={router_label.max().item()}")
-
-            #print('-'*100)
 
             router_losses.append(router_loss)
-
         loss = torch.stack(router_losses).mean()
         if args.gradient_accumulation_steps > 1:
             loss = loss / args.gradient_accumulation_steps
@@ -859,3 +805,79 @@ if __name__ == '__main__':
     #         if "ffn" not in name:
     #             if torch.allclose(param, initial_weights[name], rtol=0, atol=0):
     #                 raise ValueError("Params have not changed")
+
+
+
+
+
+  # for i in range(B):
+                    #     img_tensor = recon_B3HW[i].detach().cpu()
+                    #     img_array = (img_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+                    #     img_pil = Image.fromarray(img_array)
+                    #     global_idx = batch_idx * B + i
+                    #     filename = f"class_{batch_labels[i]:04d}_{global_idx:05d}.png"
+                    #     img_pil.save(os.path.join(sample_folder, filename))
+
+                    #     cls_label = batch_labels[i]
+                    #     # Only store the first 25 unique classes
+                    #     if cls_label not in recon_samples and len(recon_samples) < 25:
+                    #         recon_samples[cls_label] = img_array
+
+                    # # 2) If we have exactly 25 stored images in recon_samples, produce a 5×5 grid
+                    # if len(recon_samples) == 25 and 1001 not in recon_samples:
+                    #     chosen_moe_classes = sorted(recon_samples.keys())[:25]
+                    #     num_moe = len(chosen_moe_classes)  # should be 25
+                    #     rows_moe = 5
+                    #     cols_moe = 5
+                    #     fig_moe, axes_moe = plt.subplots(rows_moe, cols_moe, figsize=(10, 10))
+
+                    #     plt.subplots_adjust(wspace=0, hspace=0)
+
+                    #     for idx, cls_label in enumerate(chosen_moe_classes):
+                    #         row = idx // cols_moe
+                    #         col = idx % cols_moe
+                    #         img_np = recon_samples[cls_label]  # shape [H, W, 3]
+                    #         axes_moe[row, col].imshow(img_np, interpolation='nearest')
+                    #         axes_moe[row, col].axis("off")
+
+                    #     fig_moe.savefig(f"Images/{args.final_path_save}_with_router_{args.use_router}_tau_{tau}.png", bbox_inches="tight", pad_inches=0)
+                    #     plt.close(fig_moe)
+                    #     # Mark that we've already saved so we don't keep regenerating
+                    #     recon_samples[1001] = 'end'
+
+                    # 3) If final_path_save is base_data_moe AND tau == 1.0, we also handle recon_B3HW_var:
+                    # if args.final_path_save =='base_data_moe' and tau == 1.0:
+
+                    #         for i in range(B):
+                    #             img_tensor = recon_B3HW_var[i].detach().cpu()
+                    #             img_array = (img_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+                    #             img_pil = Image.fromarray(img_array)
+                    #             global_idx = batch_idx * B + i
+                    #             filename = f"class_{batch_labels[i]:04d}_{global_idx:05d}.png"
+                    #             img_pil.save(os.path.join(sample_folder_var, filename))
+
+                    #             cls_label = batch_labels[i]
+                    #             if cls_label not in recon_var_samples and len(recon_var_samples) < 25:
+                    #                 recon_var_samples[cls_label] = img_array
+
+                    #         # Build a 5×5 grid for the first 25 classes in recon_var_samples
+                    #         if len(recon_var_samples) == 25 and 1001 not in recon_var_samples:
+                    #             chosen_var_classes = sorted(recon_var_samples.keys())[:25]
+                    #             rows_var = 5
+                    #             cols_var = 5
+                    #             fig_var, axes_var = plt.subplots(rows_var, cols_var, figsize=(10, 10))
+                    #             plt.subplots_adjust(wspace=0, hspace=0)
+
+                    #             for idx, cls_label in enumerate(chosen_var_classes):
+                    #                 row = idx // cols_var
+                    #                 col = idx % cols_var
+                    #                 img_np = recon_var_samples[cls_label]
+                    #                 axes_var[row, col].imshow(img_np, interpolation='nearest')
+                    #                 axes_var[row, col].axis("off")
+
+                    #             fig_var.savefig("Images/var_baseline_grid.png", bbox_inches="tight", pad_inches=0)
+                    #             plt.close(fig_var)
+                    #             recon_var_samples[1001] = 'end'
+
+
+

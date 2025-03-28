@@ -3,8 +3,10 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import time
 
 from architectures.helpers import DropPath, drop_path
+from torch.profiler import record_function
 
 
 # this file only provides the 3 blocks used in VAR transformer
@@ -29,7 +31,6 @@ except ImportError:
         if attn_mask is not None: attn.add_(attn_mask)
         return (F.dropout(attn.softmax(dim=-1), p=dropout_p, inplace=True) if dropout_p > 0 else attn.softmax(dim=-1)) @ value
 
-print_first_ffn = True
 class FFN(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, drop=0., fused_if_available=True):
         super().__init__()
@@ -145,7 +146,6 @@ class SelfAttention(nn.Module):
     def extra_repr(self) -> str:
         return f'using_flash={self.using_flash}, using_xform={self.using_xform}, attn_l2_norm={self.attn_l2_norm}'
 
-print_first = True
 class AdaLNSelfAttn(nn.Module):
     def __init__(
         self, block_idx, last_drop_p, embed_dim, cond_dim, shared_aln: bool, norm_layer,
@@ -210,7 +210,14 @@ class AdaLNSelfAttn(nn.Module):
         #     print(self.ffn)
         #     temp = self.ffn(self.ln_wo_grad(x).mul(scale2.add(1)).clone().add(shift2))
         #     print('output ffn', temp.sum())
-        x = x + self.drop_path(self.ffn( self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2) ).mul(gamma2)) # this mul(gamma2) cannot be in-placed when FusedMLP is used
+        # Pre-compute the ffn input once (same as before)
+        ffn_input = self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2)
+        with record_function("FFN_Call"):
+            ffn_output = self.ffn(ffn_input)
+
+        # Then complete the rest of the computation:
+        x = x + self.drop_path(ffn_output.mul(gamma2))
+
         # if print_first:
         #     #print("x (post-ffn):", x.sum())
         #     print_first = False

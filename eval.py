@@ -886,6 +886,7 @@ def autoregressive_infer_cfg_with_expert_plot(
     type_of_model: str = "MoE_no_FT",
     final_path_save: str = "data",
     forward_mode: str = 'oracle',
+    taus = False, 
 ) -> torch.Tensor:
     """
     Autoregressive inference with CFG and two-pass TAU-based expert selection.
@@ -911,17 +912,12 @@ def autoregressive_infer_cfg_with_expert_plot(
     for b in tc.model.blocks:
         b.attn.kv_caching(True)
         b.ffn.forward_mode = forward_mode
-        b.ffn.tau = tau
         b.ffn.experts.forward_mode = 'triton_atomic'
 
     # Get all MoE modules within the blocks.
     moe_modules = [m for b in tc.model.blocks for m in b.modules() if hasattr(m, 'gate') and hasattr(m, 'router')]
 
     original_gates = {m: m.gate for m in moe_modules}
-
-    torch.cuda.synchronize()
-    start_time = time.perf_counter()
-    mask_time_total = 0
 
     cur_L = 0
     num_scales = len(tc.model.patch_nums)
@@ -958,9 +954,12 @@ def autoregressive_infer_cfg_with_expert_plot(
 
         x = next_token_map  # Autoregressive token input.
         list_of_outputs = []
-        for index, b in enumerate(tc.model.blocks):  
-            out = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
-            x = out[0] if isinstance(out, tuple) else out
+        for index, b in enumerate(tc.model.blocks):
+            if taus:
+                b.ffn.tau = taus[si]
+            else:
+                b.ffn.tau = tau
+            x, _ = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
             if compare_dicts:
                 list_of_outputs.append(x.clone())
        
@@ -974,11 +973,10 @@ def autoregressive_infer_cfg_with_expert_plot(
                 usage_list_for_this_scale.append(moex.routing_mask.clone())  
             predicted_dictionary['experts_per_token'].append(usage_list_for_this_scale)
         
-        mask_start = time.perf_counter()
+
         total_flops += sum(moex.routing_mask.clone().sum() for moex in moe_modules)
         mean_flops += sum(moex.routing_mask.clone().mean() for moex in moe_modules)
-        mask_end = time.perf_counter()
-        mask_time_total += (mask_end - mask_start)
+        
 
         logits_BlV = tc.model.get_logits(x, cond_BD)
         t = cfg * ratio
@@ -1001,9 +999,9 @@ def autoregressive_infer_cfg_with_expert_plot(
         if compare_dicts:
             predicted_dictionary['f_hat'].append(f_hat.clone())
 
-        final_img = tc.model_vae.fhat_to_img(f_hat.clone())
-        img = final_img[0].add_(1).mul_(0.5).permute(1, 2, 0).mul(255).clamp(0,255).cpu().numpy().astype(np.uint8)
         if compare_dicts:
+            final_img = tc.model_vae.fhat_to_img(f_hat.clone())
+            img = final_img[0].add_(1).mul_(0.5).permute(1, 2, 0).mul(255).clamp(0,255).cpu().numpy().astype(np.uint8)
             predicted_dictionary['img'].append(img)
 
         if si != tc.model.num_stages_minus_1:
@@ -1015,9 +1013,6 @@ def autoregressive_infer_cfg_with_expert_plot(
 
     for b in tc.model.blocks:
         b.attn.kv_caching(False)
-
-    torch.cuda.synchronize()
-    end_time = time.perf_counter()
 
     # If debug comparisons were requested, run them.
     if compare_dicts and debug_data is not None:
@@ -1119,10 +1114,7 @@ def autoregressive_infer_cfg_with_expert_plot(
     for m in moe_modules:
         m.gate = original_gates[m]
 
-    effective_time = (end_time - start_time) - mask_time_total
-    
-
-    return tc.model_vae.fhat_to_img(f_hat).add_(1).mul_(0.5), mean_flops, total_flops, effective_time
+    return tc.model_vae.fhat_to_img(f_hat).add_(1).mul_(0.5), mean_flops, total_flops
 
 
 @torch.no_grad()

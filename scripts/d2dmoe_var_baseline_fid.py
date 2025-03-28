@@ -49,12 +49,12 @@ def main():
     qos = None
 
     # partition = 'plgrid-gpu-a100'
-    partition = 'gpu_h100'
+    partition = 'gpu_a100'
     # partition = 'dgx'
     # partition = 'rtx3080'
     # partition = 'batch'
 
-    timeout = 4*60 #60 * 24 * 7
+    timeout = 20 #60 * 24 * 7
     # timeout = 60 * 24 * 2
 
     gpus_per_task = 1
@@ -176,48 +176,36 @@ def main():
     # dsti_routing_args.model_args.output_activation = 'identity'
     dsti_routing_args.dsti_router_labels_layer = 'output'
     dsti_routing_args.dsti_router_labels_norm = 2
-    dsti_routing_args.dsti_tau_to_eval = [0.9, 0.925, 0.95, 0.97, 0.99, 1.0]
-    #[0.5, 0.8, 1.0]
-    # [0.9, 0.925, 0.93, 0.935, 0.94, 0.945,0.95,
-    #                                       0.96, 0.97, 0.98, 0.99, 0.995, 0.999, 0.9999, 1.0]
-                                           
-    # [0.5, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.925, 0.95,
-    #                                       0.96, 0.97, 0.98, 0.99, 0.995, 0.999, 0.9999, 1.0]
     
-    dsti_routing_args.dsti_expert_selection_mode = 'dynk_max'
+    #dsti_routing_args.dsti_expert_selection_mode = 'dynk_max'
     dsti_routing_args.eval_points = 4
     # dsti_routing_args.eval_points = 0
     dsti_routing_args.mixed_precision = None
     #dsti_routing_args.mixed_precision = 'bf16'
     # Include Sparsity or not
-    dsti_routing_args.fid = True
-    dsti_routing_args.debug = True
-    dsti_routing_args.use_router = True
-
     final_path_save = [
-       # 'relu_data_0',
+        'relu_data_0',
         #'relu_data_0.1',
         #'relu_data_0.01',
-        'relu_data_0.001',
+        #'relu_data_0.001',
         #'relu_data_0.0001',
         #'base_data_moe',
     ]
 
     path_file_ft = [
-        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.1/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.01/final.pth',
-        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.001/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.001/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.0001/final.pth',
     ]
 
     path_file_moe = [
-        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0/final.pth',
-       #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.1/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.1/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.01/final.pth',
-        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.001/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.001/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.0001/final.pth',
-        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/base_moe/final.pth',
     ]
 
 
@@ -227,18 +215,25 @@ def main():
     for base_on_exp_name in base_split_exp_names:
         for exp_id in exp_ids:
             for i in range(len(final_path_save)):
-
-                dsti_routing_args.path_file_moe = path_file_moe[i]
+                dsti_routing_args.dsti_tau_to_eval =  [0.97] #[[1.0, 1.0, 1.0, 1.0, 1.0, 0.922, 0.921, 0.898, 0.883, 0.850], [1.0, 1.0, 1.0, 1.0, 1.0, 0.917, 0.882, 0.861, 0.799, 0.702]]
+                dsti_routing_args.dsti_tau_as_list = False
+                dsti_routing_args.use_router = True
+                dsti_routing_args.fid = True
+                dsti_routing_args.debug = True
                 dsti_routing_args.final_path_save = final_path_save[i]
 
                 if dsti_routing_args.final_path_save == 'base_data_moe':
                     dsti_routing_args.activation = None
+                    dsti_routing_args.dsti_tau_to_eval = [1.0]
+                    dsti_routing_args.use_router = False
                 elif 'relu' in dsti_routing_args.final_path_save:
                     dsti_routing_args.activation = 'relu'
                     dsti_routing_args.path_file_ft = path_file_ft[i]
+                    dsti_routing_args.path_file_moe = path_file_moe[i]
                 else:
                     dsti_routing_args.activation = 'gelu'
                     dsti_routing_args.path_file_ft = path_file_ft[i]
+                    dsti_routing_args.path_file_moe = path_file_moe[i]
 
                 args = deepcopy(dsti_routing_args)
                 args.exp_id = exp_id

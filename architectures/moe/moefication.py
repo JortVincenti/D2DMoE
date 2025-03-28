@@ -90,43 +90,60 @@ class MoeficationMoE(MoELayer):
             routing_tensor[predicted_expert_norms >= norm_thresholds] = 1.0
             self.routing_mask = routing_tensor.sum(dim=-1)
         elif self.forward_mode == 'oracle':            
-            # Save original shape (ideally [2, 1, 1024])
-            orig_size = x.size()  
-            # x is currently [2, 1024]. If you intended [2,1,1024], make sure x has that shape.
-            #print('x oracle', x.shape)  # Expected: [2, 1024] if orig_size was [2,1024]
-            x = x.view(-1, x.size(-1))
-            assert x.dim() == 2, f'{x.size()=}'
-            x = x.unsqueeze(0)
+            B, T, d = x.size()  # x is (B,T,d)
+        
+            # Flatten to (B*T, d)
+            x_flat = x.view(B*T, d)
             
-            if isinstance(self.experts, CustomKernelExperts):
-                x = self.experts.forward_without_routing(x)
+            # Expand so first dimension is 'e = number_of_experts': (E, B*T, d)
+            e = self.num_experts
+            x_expanded = x_flat.unsqueeze(0).expand(e, -1, -1)
+            
+            # Run forward_without_routing
+            x_expert_out = self.experts.forward_without_routing(x_expanded)
+            
+            # norms => shape (E,B*T)
+            norms = torch.linalg.vector_norm(x_expert_out, ord=2, dim=-1)
+            # Reshape to (E,B,T)
+            norms = norms.view(e, B, T)
+            
+            # Compute max norms => shape (1,B,T)
+            max_norms, _ = norms.max(dim=0, keepdim=True)
+            # norm_thresholds => shape (1,B,T)
+            if isinstance(self.tau, list):
+                # Define the group sizes that sum to 680:
+                # 1, 4, 9, 16, 25, 36, 64, 100, 169, 256
+                group_sizes = [1, 4, 9, 16, 25, 36, 64, 100, 169, 256]
+                # Build a 1D tensor (length=680) of threshold factors.
+                # For each group, the factor is (1.0 - tau[i]).
+                factors = []
+                for tau_val, group_size in zip(self.tau, group_sizes):
+                    # Create a tensor filled with (1.0 - tau_val) for this group.
+                    group_factor = torch.full((group_size,),
+                                                1.0 - tau_val,
+                                                device=max_norms.device,
+                                                dtype=max_norms.dtype)
+                    factors.append(group_factor)
+                # Concatenate all factors to obtain a tensor of shape [680]
+                factors = torch.cat(factors, dim=0)
+                # Reshape factors to [1, 1, 680] so they broadcast over the batch dimension
+                factors = factors.view(1, 1, -1)
+                # Compute the norm thresholds using the per-position factors.
+                norm_thresholds = max_norms * factors
             else:
-                for layers in self.experts.layers:
-                    x = layers(x)
+                norm_thresholds = max_norms * (1.0 - self.tau)
 
-            # Suppose B = input.size(0), T = input.size(1)
-            e = x.size(0)
-            B = orig_size[0]
-            T = orig_size[1]
-
-            norms = torch.linalg.vector_norm(x, ord=2, dim=-1)
-            max_norms = norms.view(e, B, T).permute(1, 2, 0)  # => shape (B, T, e)
-            max_norms, _ = norms.max(dim=-1, keepdim=True)
-            norm_thresholds = max_norms * (1.0 - self.tau)
+            # new_routing => shape (E,B,T)
             new_routing = torch.zeros_like(norms)
             new_routing[norms >= norm_thresholds] = 1.0
-            new_routing = new_routing.transpose(0, 1) 
-            routing_tensor = new_routing
-            self.routing_mask = new_routing.sum(dim=0)
+
+            # Permute => (B,T,E)
+            routing_tensor = new_routing.permute(1, 2, 0)
+
+            # For inspection (optionally):
+            self.routing_mask = routing_tensor.sum(dim=-1)
         else:
             raise ValueError(f'Unsupported forward_mode: {self.forward_mode}')
-
-        # print('routing_tensor', routing_tensor.shape)
-        # print('predicted_expert_norms', predicted_expert_norms.shape)
-        # print('predicted_expert_norms[0]', predicted_expert_norms[0])
-        # print('max_norms', max_norms.shape)
-        # print('max_norms[0]', max_norms[0])
-        # print('routing_tensor', routing_tensor.shape)
         return routing_tensor
     
     def forward(self, x):
@@ -370,98 +387,6 @@ def param_clustering_split(ffn, moe_layer):
         raise NotImplementedError('Other variants not handled yet')
 
 
-# def param_clustering_split(ffn, moe_layer):
-#     """
-#     This version does NOT do any clustering. Instead, it partitions the
-#     FFN's hidden dimension contiguously across num_experts. The result:
-#     if you route to all experts, the output is exactly the same as the
-#     original ffn.
-
-#     ffn is expected to have two layers:
-#       w1: first linear  (in_features -> out_features)
-#       w2: second linear (out_features -> ???)
-#     moe_layer is expected to have:
-#       moe_layer.num_experts = number of experts
-#       moe_layer.experts = ExecuteAllExperts with depth == 2
-#       (like in your snippet)
-#     """
-
-#     num_experts = moe_layer.num_experts
-
-#     # 1) Identify the first & second linear layers in `ffn`
-#     if isinstance(ffn, nn.Sequential):
-#         # Suppose ffn[0] is the first linear, ffn[3] is the second
-#         w1 = ffn[0]  # nn.Linear
-#         w2 = ffn[3]  # nn.Linear
-#     elif hasattr(ffn, "c_fc") and hasattr(ffn, "c_proj"):  # GPT style
-#         w1 = ffn.c_fc   # first linear
-#         w2 = ffn.c_proj # second linear
-#     elif hasattr(ffn, "intermediate") and hasattr(ffn, "output"):  # BERT style
-#         w1 = ffn.intermediate.dense
-#         w2 = ffn.output.dense
-#     elif hasattr(ffn, "fc1") and hasattr(ffn, "fc2"):      # Basic FFN
-#         w1 = ffn.fc1
-#         w2 = ffn.fc2
-#     else:
-#         raise ValueError(f'Unsupported ffn type: {type(ffn)}')
-
-#     # 2) Set up dimensions & chunking
-#     hidden_dim = w1.in_features
-#     d_ff = w1.out_features       # total # of neurons in the first linear
-#     expert_size = d_ff // num_experts
-#     # We expect (d_ff % num_experts == 0) for a perfect split
-
-#     # Instead of K-Means, we do a simple chunk-based assignment:
-#     # e.g. if d_ff=1024, num_experts=16 => each chunk is size 64
-#     # chunk 0 => neurons [0..63], chunk 1 => [64..127], etc.
-#     labels = np.repeat(np.arange(num_experts), expert_size)  # shape = (d_ff,)
-
-#     if isinstance(moe_layer.experts, ExecuteAllExperts):
-#         assert moe_layer.experts.depth == 2, "We only handle 2-layer MoE modules"
-#         with torch.no_grad():
-#             filled_neuron_counts = [0 for _ in range(num_experts)]
-
-#             # Copy row i of w1 -> row in the assigned expert
-#             for neuron_index, expert_index in enumerate(labels):
-#                 expert_neuron_index = filled_neuron_counts[expert_index]
-
-#                 # Move w1.weight[i,:] -> first layer of this expert
-#                 # shape of moe_layer.experts.layers[0].w is [num_experts, in_features, expert_size]
-#                 # so we do   [expert_index, :, expert_neuron_index]
-#                 moe_layer.experts.layers[0].w[expert_index, :, expert_neuron_index].copy_(
-#                     w1.weight[neuron_index]
-#                 )
-#                 if moe_layer.bias:
-#                     moe_layer.experts.layers[0].b[expert_index, :, expert_neuron_index].copy_(
-#                         w1.bias[neuron_index]
-#                     )
-
-#                 # Move w2.weight[:, i] -> second layer of this expert
-#                 # shape of moe_layer.experts.layers[1].w is [num_experts, expert_size, out_dim]
-#                 # but the snippet in your code used shape [num_experts, expert_size], or [num_experts, expert_size, ???]
-#                 # We'll match your snippet: layers[1].w[expert_index, expert_neuron_index].copy_(...)
-#                 # meaning it expects w2.weight has shape [out_dim, d_ff].
-#                 # The original snippet does: w2.weight[:, neuron_index]
-#                 # => we place that in [expert_index, expert_neuron_index].
-#                 moe_layer.experts.layers[1].w[expert_index, expert_neuron_index].copy_(
-#                     w2.weight[:, neuron_index]
-#                 )
-
-#                 filled_neuron_counts[expert_index] += 1
-
-#             # copy the last layer bias if present
-#             if moe_layer.bias:
-#                 moe_layer.last_bias.copy_(w2.bias)
-#     else:
-#         raise NotImplementedError("Only handle ExecuteAllExperts with depth=2 for now")
-
-#     # Now, if the MoE forward pass sums across ALL experts, the
-#     # result is identical to old ffn(x) => w2( w1(x) ) as long as
-#     # all sub-layers are used + no gating differences + no additional
-#     # normalization or transformations are introduced.
-
-
-
 def split_original_parameters(original_model: nn.Module, moe_model: nn.Module, replaced_module_names: List[str]):
     
     if hasattr(original_model, "module"):  # Only access module if it exists
@@ -480,25 +405,6 @@ def split_original_parameters(original_model: nn.Module, moe_model: nn.Module, r
         logging.info(f'Clustering parameters from {name} into {num_experts} experts')
         param_clustering_split(original_module, moe_module)
 
-
-# class MoeficationRouter(nn.Module):
-#     def __init__(self, hidden_dim, num_experts, width=128, depth=2, bias=False, activation='tanh',
-#                  output_activation='identity', test_override_outputs_p=None):
-#         super().__init__()
-#         self.layers = nn.ModuleList()
-#         if depth == 1:
-#             self.layers.append(nn.Linear(hidden_dim, num_experts, bias=bias))
-#         else:
-#             self.layers.append(nn.Linear(hidden_dim, width, bias=bias))
-#             self.layers.append(ACTIVATION_NAME_MAP[activation]())
-#             for i in range(depth - 2):
-#                 self.layers.append(nn.Linear(width, width, bias=bias))
-#                 self.layers.append(ACTIVATION_NAME_MAP[activation]())
-#             self.layers.append(nn.Linear(width, num_experts, bias=bias))
-#         self.layers.append(ACTIVATION_NAME_MAP[output_activation]())
-#         self.test_override_outputs_p = test_override_outputs_p
-#         if test_override_outputs_p is not None:
-#             self.response_cache = {}
 
 class MoeficationRouter(nn.Module):
     def __init__(self, hidden_dim, num_experts, width=128, depth=2, bias=False, activation='tanh',
@@ -540,52 +446,10 @@ class MoeficationRouter(nn.Module):
                     nn.init.zeros_(layer.bias)
 
     def forward(self, x):
-        # Print initialization info for Linear layers
-        # for idx, layer in enumerate(self.layers):
-        #     if isinstance(layer, nn.Linear):
-        #         print(f"Initialized layer {idx} (Linear):")
-        #         print(f"  Weight: min: {layer.weight.data.min().item():.4f}, max: {layer.weight.data.max().item():.4f}, "
-        #               f"mean: {layer.weight.data.mean().item():.4f}, std: {layer.weight.data.std().item():.4f}")
-        #         if layer.bias is not None:
-        #             print(f"  Bias: min: {layer.bias.data.min().item():.4f}, max: {layer.bias.data.max().item():.4f}, "
-        #                   f"mean: {layer.bias.data.mean().item():.4f}, std: {layer.bias.data.std().item():.4f}")
-
-        # Print input statistics
-        # print("Router input:")
-        # print(f"  shape: {x.shape}")
-        # print(f"  min: {x.min().item():.4f}, max: {x.max().item():.4f}, "
-        #     f"mean: {x.mean().item():.4f}, std: {x.std().item():.4f}")
         
         # Iterate through each layer, printing intermediate outputs and (optionally) layer weights
         for idx, layer in enumerate(self.layers):
             x = layer(x)
-            # print(f"After layer {idx} ({layer.__class__.__name__}):")
-            # print(f"  shape: {x.shape}")
-            # print(f"  min: {x.min().item():.4f}, max: {x.max().item():.4f}, "
-            #     f"mean: {x.mean().item():.4f}, std: {x.std().item():.4f}")
-            
-            # # Optionally, print layer parameters if it is a Linear layer:
-            # if isinstance(layer, nn.Linear):
-            #     weight = layer.weight.data
-            #     bias = layer.bias.data if layer.bias is not None else None
-            #     print(f"  Weight: min: {weight.min().item():.4f}, max: {weight.max().item():.4f}, "
-            #         f"mean: {weight.mean().item():.4f}, std: {weight.std().item():.4f}")
-            #     if bias is not None:
-            #         print(f"  Bias: min: {bias.min().item():.4f}, max: {bias.max().item():.4f}, "
-            #             f"mean: {bias.mean().item():.4f}, std: {bias.std().item():.4f}")
-        
-        # Print final output statistics
-        # print("Final router output:")
-        # print(f"  shape: {x.shape}")
-        # print(f"  min: {x.min().item():.4f}, max: {x.max().item():.4f}, "
-        #     f"mean: {x.mean().item():.4f}, std: {x.std().item():.4f}")
-        # num_zeros = (x == 0).sum().item()
-        # total = x.numel()
-        # print(f"  zeros: {num_zeros}/{total} ({(num_zeros/total)*100:.2f}%)")
-        
-        
-        # for l in self.layers:
-        #     x = l(x)
 
         if self.test_override_outputs_p is not None: # Jort: This is not used
             cache_key = (x.size(0), x.size(1))

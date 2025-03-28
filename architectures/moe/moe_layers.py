@@ -287,11 +287,13 @@ class CustomKernelExperts(ExpertsLayer):
         with torch.no_grad():
             sort_indices, expert_bincounts = \
                 self.extract_indices_atomic(routing_tensor)
+
         intermediate_acts = MoeFirstLayerImplementation.apply(
             x, self.w1, self.b1,
             sort_indices,
             expert_bincounts,
             self.activation_str)
+
         final_out = MoeSecondLayerAtomicImplementation.apply(
             intermediate_acts, self.w2,
             sort_indices,

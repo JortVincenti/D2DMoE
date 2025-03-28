@@ -161,7 +161,6 @@ class VAR(nn.Module):
             'block_output': [],
             'img': [],
         }
-        # Scale-wise processing
         for si, pn in enumerate(self.patch_nums):  # si: i-th segment
             ratio = si / self.num_stages_minus_1
             debug_data["ratio"].append(ratio)

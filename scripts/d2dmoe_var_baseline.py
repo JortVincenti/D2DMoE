@@ -54,7 +54,7 @@ def main():
     # partition = 'rtx3080'
     # partition = 'batch'
 
-    timeout = 20*60 #60 * 24 * 7
+    timeout = 10 #60 * 24 * 7
     # timeout = 60 * 24 * 2
 
     gpus_per_task = 1
@@ -195,16 +195,16 @@ def main():
     # Include Sparsity or not
 
     final_path_save = [
-        'relu_data_0',
-       # 'relu_data_0.1',
+        #'relu_data_0',
+       'relu_data_0.1',
         #'relu_data_0.01',
         #'relu_data_0.001',
         #'relu_data_0.0001',
     ]
 
     path_file_ft = [
-        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0/final.pth',
-        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.1/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.1/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.01/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.001/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.0001/final.pth',
@@ -212,8 +212,8 @@ def main():
     ]
 
     path_file_moe = [
-        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0/final.pth',
-        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.1/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.1/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.01/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.001/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.0001/final.pth',

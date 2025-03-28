@@ -4,6 +4,8 @@ from triton import language as tl
 
 from utils import row_major, column_major, grouped, leaky_relu, relu, tanh, gelu, config_grid
 
+import os
+os.environ["TRITON_DEBUG"] = "1"  # or os.environ["TRITON_LOG_LEVEL"] = "DEBUG"
 
 class MoeFirstLayerImplementation(torch.autograd.Function):
     @staticmethod
@@ -48,6 +50,11 @@ class MoeFirstLayerImplementation(torch.autograd.Function):
                                NUM_EXPERTS=num_experts,
                                ACTIVATION=activation_str,
                                )
+        # Print the autotuning metadata after the first kernel call.
+        print("Input shape:", input.shape)
+        print("Best config:", moe_first_kernel.best_config)
+        print('-'*100)
+
         return out
 
     @staticmethod
@@ -62,7 +69,6 @@ class MoeFirstLayerImplementation(torch.autograd.Function):
         (input, weight, bias, sort_indices, expert_bincounts) = ctx.saved_tensors
         activation_str = ctx.activation_str
         raise NotImplementedError('TODO')
-
 
 @triton.autotune(
     configs=config_grid({

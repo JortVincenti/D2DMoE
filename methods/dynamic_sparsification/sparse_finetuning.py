@@ -317,8 +317,6 @@ def training_loop(args, tc):
                     dsti_enforce_weight * sparsity_loss_attn)
 
 
-            old_params = {name: param.clone() for name, param in tc.model.named_parameters() if param.requires_grad}
-
             grad_norm, scale_log2 = tc.trainer.var_opt.backward_clip_step(loss=loss, stepping=True)
 
             pred_BL = logits_BLV.data.argmax(dim=-1)

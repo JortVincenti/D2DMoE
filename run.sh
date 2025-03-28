@@ -25,6 +25,7 @@ source user.env
 eval "$(conda shell.bash hook)"
 conda activate effbench_env
 
+#pip install --no-cache-dir plotly
 # pip uninstall torch-fidelity
 # pip install -e git+https://github.com/LTH14/torch-fidelity.git@master#egg=torch-fidelity
 

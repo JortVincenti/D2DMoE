@@ -11,6 +11,8 @@ from architectures.moe.moe_layers import MoELayer
 import torch.nn.functional as F
 from typing import Optional
 from architectures.basic_var import AdaLNSelfAttn, FFN
+from torch.profiler import record_function
+import time
 
 def moe_attention_forward(self: CustomMultiheadAttention, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
                           _key_padding_mask=None,
@@ -78,9 +80,8 @@ def moe_vit_block_forward(self, input: torch.Tensor):
         y = self.mlp(y)
     return x + y, gating_data
 
-print_first = True
+
 def moe_var_block_forward(self, x, cond_BD, attn_bias):
-    global print_first
     gating_data = {}
     # print('-'*50)	
     # print('x:', x.sum())
@@ -139,16 +140,18 @@ def moe_var_block_forward(self, x, cond_BD, attn_bias):
         #     y, ffn_gating_data = self.ffn(self.ln_wo_grad(x).mul(scale2.add(1)).clone().add(shift2))
         #     print('input into ffn', y.sum())
         # else:
-        y, ffn_gating_data = self.ffn(self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2))
-        x = x + self.drop_path(y.mul(gamma2))
+        # Pre-compute the ffn input:
+        ffn_input = self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2)
+        #with record_function("FFN_Call"):
+        y, ffn_gating_data = self.ffn(ffn_input)
 
+
+        # Continue with the rest of the operations:
+        x = x + self.drop_path(y.mul(gamma2))
         gating_data.update(ffn_gating_data)
     else:
         x = x + self.drop_path(self.ffn(self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2)).mul(gamma2))
-   
-    if print_first:
-        # print("x (post-ffn):", x.sum())
-        print_first = False
+
 
     return x, gating_data
 
@@ -235,7 +238,6 @@ def moe_var_main_forward(
     # -------------------------------------------------------------------------
     # 1) Move inputs onto the correct device(s)
     # -------------------------------------------------------------------------
-    #assert False, "This function should not be called directly"
     device_class = self.class_emb.weight.device  # device of class_emb
     if class_idx is not None and class_idx.device != device_class:
         class_idx = class_idx.to(device_class)
