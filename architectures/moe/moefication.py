@@ -27,7 +27,9 @@ from architectures.pretrained import NullDDP
 from architectures.basic_var import FFN
 from architectures.var import VAR
 import numpy as np
-
+from torch.profiler import record_function
+import torch.nn.functional as F
+import time
 
 class MoeficationMoE(MoELayer):
     # https://arxiv.org/pdf/2110.01786.pdf
@@ -55,6 +57,22 @@ class MoeficationMoE(MoELayer):
         self.tau = None
         self.add_residual_connection = add_residual_connection
         self.routing_mask = None
+
+        # Compute and store centroids in self.centroids
+        all_centroids = []
+        #  [num_experts, in_features, neurons_per_expert].)
+        for expert_idx in range(self.num_experts):
+            # Extract the sub-tensor for this expert: shape [in_features, neurons_per_expert]
+            w1_expert = self.experts.w1[expert_idx]
+            # Re-normalize each column to unit length (dim=0 means "normalize across rows")
+            w1_expert_norm = F.normalize(w1_expert, p=2, dim=0)
+
+            # Compute centroid by taking the mean of columns => shape [in_features]
+            centroid = w1_expert_norm.mean(dim=1)
+            all_centroids.append(centroid)
+
+        # Stack all expert centroids into [num_experts, in_features]
+        self.centroids = torch.stack(all_centroids, dim=0).to('cuda')
 
     def gate(self, x):
         # x is of size (batch_size, sequence_length, dim)
@@ -84,8 +102,28 @@ class MoeficationMoE(MoELayer):
             routing_tensor = cumulative_mask.gather(dim=-1, index=expert_share_indices.argsort(dim=-1)).to(x.dtype)
         elif self.forward_mode == 'dynk_max':
             predicted_expert_norms = self.router(x)
-            max_norms, _ = predicted_expert_norms.max(dim=-1, keepdim=True)
-            norm_thresholds = max_norms * (1.0 - self.tau)
+            max_norms, _ = predicted_expert_norms.max(dim=-1, keepdim=True) #This is for the other 0.
+            if isinstance(self.tau, list):
+                # Define the group sizes that sum to 680:
+                group_sizes = [1, 4, 9, 16, 25, 36, 64, 100, 169, 256]
+                # Build a 1D tensor (length=680) of threshold factors.
+                # For each group, the factor is (1.0 - tau[i]).
+                factors = []
+                for tau_val, group_size in zip(self.tau, group_sizes):
+                    # Create a tensor filled with (1.0 - tau_val) for this group.
+                    group_factor = torch.full((group_size,),
+                                                1.0 - tau_val,
+                                                device=max_norms.device,
+                                                dtype=max_norms.dtype)
+                    factors.append(group_factor)
+                # Concatenate all factors to obtain a tensor of shape [680]
+                factors = torch.cat(factors, dim=0)
+                # Reshape factors to [1, 1, 680] so they broadcast over the batch dimension
+                factors = factors.view(1, -1, 1)
+                # Compute the norm thresholds using the per-position factors.
+                norm_thresholds = max_norms * factors
+            else:
+                norm_thresholds = max_norms * (1.0 - self.tau)
             routing_tensor = torch.zeros_like(predicted_expert_norms)
             routing_tensor[predicted_expert_norms >= norm_thresholds] = 1.0
             self.routing_mask = routing_tensor.sum(dim=-1)
@@ -106,7 +144,6 @@ class MoeficationMoE(MoELayer):
             norms = torch.linalg.vector_norm(x_expert_out, ord=2, dim=-1)
             # Reshape to (E,B,T)
             norms = norms.view(e, B, T)
-            
             # Compute max norms => shape (1,B,T)
             max_norms, _ = norms.max(dim=0, keepdim=True)
             # norm_thresholds => shape (1,B,T)
@@ -142,8 +179,80 @@ class MoeficationMoE(MoELayer):
 
             # For inspection (optionally):
             self.routing_mask = routing_tensor.sum(dim=-1)
+        elif self.forward_mode == 'centroids':
+            """
+            For each token in x:
+            1) Compute dot product similarity with each expert's centroid (cosine or raw).
+            2) Take top-k in descending order.
+            3) Compute cumulative sum of those k values.
+            4) Keep only the subset whose cumsum < ratio * total_sum. 
+                (Ensure at least 1 expert is chosen.)
+            """
+            # x shape: (B, T, D)
+            B, T, D = x.size()
+
+            # 1) [Optional] L2 normalize x and centroids (if you want cosine similarity)
+            x_norm = x / (x.norm(dim=-1, keepdim=True) + 1e-9)  # (B, T, D)
+            centroids_norm = self.centroids / (self.centroids.norm(dim=-1, keepdim=True) + 1e-9)  # (num_experts, D)
+            # 2) Compute similarity => (B, T, num_experts)
+            similarity = torch.einsum('btd,ed->bte', x_norm, centroids_norm)
+            similarity = F.relu(similarity)  # all negative scores become 0
+
+            # print("[DEBUG] similarity shape:", similarity.shape)
+            # Print stats for a sample token (say, token[0,0])
+            sample_sim = similarity[0, 0, :]
+            #print("[DEBUG] Token[0,0] similarity (first 10 values):", sample_sim[:10].detach().cpu().numpy())
+
+            # 3) top-k retrieval in descending order (here using all experts)
+            topk_values, topk_indices = torch.topk(similarity, k=self.num_experts, dim=-1, largest=True, sorted=True)
+            #print("[DEBUG] Token[0,0] topk values:", topk_values[0, 0, :].detach().cpu().numpy())
+
+            # 4) Summation and cumulative sum over top-k values
+            sum_scores = topk_values.sum(dim=-1, keepdim=True)  # (B, T, 1)
+            cumsum_scores = torch.cumsum(topk_values, dim=-1)    # (B, T, k)
+            threshold = self.tau * sum_scores                     # (B, T, 1)
+            # print("[DEBUG] Token[0,0] total score:", sum_scores[0, 0, 0].item())
+            # print("[DEBUG] Token[0,0] cumulative topk scores:", cumsum_scores[0, 0, :].detach().cpu().numpy())
+            # print("[DEBUG] Token[0,0] threshold (self.tau * total):", threshold[0, 0, 0].item())
+
+            # 5) Build a boolean mask to decide which experts to keep
+            keep_mask = (cumsum_scores < threshold)
+            # Guarantee at least 1 expert remains per token:
+            first_expert_mask = torch.zeros_like(keep_mask)
+            first_expert_mask[..., 0] = True  # force the top expert to always be kept
+            keep_mask = keep_mask | first_expert_mask
+            #print("[DEBUG] Token[0,0] keep_mask (boolean):", keep_mask[0, 0, :].detach().cpu().numpy())
+            #print("[DEBUG] Token[0,0] keep_mask (as int):", keep_mask[0, 0, :].int().detach().cpu().numpy())
+            # Also, print for a few tokens (if desired) the percentage of experts kept:
+            keep_fraction = keep_mask.float().mean(dim=-1)
+            #print("[DEBUG] Average keep_mask fraction per token (B x T):", keep_fraction.detach().cpu().numpy())
+
+            # 6) Create routing_tensor and scatter 1.0 into the kept positions
+            routing_tensor = torch.zeros_like(similarity)  # (B, T, num_experts)
+            keep_mask_float = keep_mask.type_as(routing_tensor)  # ensure same dtype
+            routing_tensor.scatter_(2, topk_indices, keep_mask_float)
+            #print("[DEBUG] routing_tensor shape:", routing_tensor.shape)
+
+            # 7) Inspect the final routing decisions:
+            self.routing_mask = routing_tensor.sum(dim=-1)  # (B, T): number of experts selected per token
+            # For token[0,0]:
+            #print('Routing mask for first token', self.routing_mask.flatten())
+        elif self.forward_mode == 'random':
+            # Assume x has shape (B, T, d)
+            B, T, d = x.size()  
+            e = self.num_experts  # number of experts
+
+            # Instead of computing x_expert_out = self.experts.forward_without_routing(x_expanded)
+            # and thresholding the norms, we generate a random routing tensor with 1's with probability tau
+            # and 0's otherwise. The output routing_tensor will have shape (B, T, e)
+            routing_tensor = (torch.rand(B, T, e, device=x.device) < self.tau).float()
+
+            # Optionally, for inspection you might want to know how many experts were selected per token,
+            # which will yield a tensor of shape (B, T) with counts.
+            self.routing_mask = routing_tensor.sum(dim=-1)
         else:
             raise ValueError(f'Unsupported forward_mode: {self.forward_mode}')
+        
         return routing_tensor
     
     def forward(self, x):
@@ -157,7 +266,13 @@ class MoeficationMoE(MoELayer):
         x = x.view(-1, x.size(-1))
         #print('x', x.shape)
         #print(' routing_tensor.view(-1, routing_tensor.size(-1)',  routing_tensor.view(-1, routing_tensor.size(-1)).shape)
-        out = self.experts(x, routing_tensor.view(-1, routing_tensor.size(-1)))
+        with record_function("FFN_Experts"):
+        # torch.cuda.synchronize()
+        # start_time = time.time()
+            out = self.experts(x, routing_tensor.view(-1, routing_tensor.size(-1)))
+        # torch.cuda.synchronize()
+        # elapsed = time.time() - start_time
+        # print(f"Time for new FFN call: {elapsed * 1000.0:.3f} ms")
         #print('out true experts', out.shape)
 
         if self.bias:
@@ -166,6 +281,7 @@ class MoeficationMoE(MoELayer):
             out = out + x
         out = out.view(orig_size)
         #print('Bias Last', self.last_bias.sum())
+
         return out, {self.name: (routing_tensor,)}
 
 

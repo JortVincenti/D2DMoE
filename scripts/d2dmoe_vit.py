@@ -48,7 +48,7 @@ def main():
     qos = None
 
     # partition = 'plgrid-gpu-a100'
-    partition = 'gpu'
+    partition = 'gpu_a100'
     # partition = 'dgx'
     # partition = 'rtx3080'
     # partition = 'batch'
@@ -333,14 +333,14 @@ def main():
             args.base_on = base_on_exp_name
             exp_name, run_name = generate_run_name(args)
             base_run_name = f'{base_on_exp_name}_{exp_id}'
-            # if base_run_name in run_to_job_map:
-            #     dependency_str = f"afterany:{run_to_job_map[base_run_name].job_id}"
-            #     executor.update_parameters(slurm_additional_parameters={"dependency": dependency_str})
-            # else:
-            #     executor.update_parameters(slurm_additional_parameters={})
-            # job = submit_job(executor, dsti_train_routers, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
-            # jobs.append(job)
-            # run_to_job_map[run_name] = job
+            if base_run_name in run_to_job_map:
+                dependency_str = f"afterany:{run_to_job_map[base_run_name].job_id}"
+                executor.update_parameters(slurm_additional_parameters={"dependency": dependency_str})
+            else:
+                executor.update_parameters(slurm_additional_parameters={})
+            job = submit_job(executor, dsti_train_routers, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
+            jobs.append(job)
+            run_to_job_map[run_name] = job
         exp_names.append(exp_name)
         base_routed_dsti_exp_names.append(exp_names[-1])
         display_names.append(f'DSTI')

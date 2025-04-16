@@ -41,29 +41,137 @@ class FFN(nn.Module):
         self.act = nn.GELU(approximate='tanh')
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop, inplace=True) if drop > 0 else nn.Identity()
-    
-    def forward(self, x):
+
+        # For stats
+        self.sum_activations_list = None
+        self.count_activations_value = 0
+        self.track_activation_stats = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass. If fused_mlp_func is set, use that; otherwise do standard fc1 -> activation -> fc2.
+        We also optionally track activation stats (for pruning) if track_activation_stats=True.
+        """
+        # Example check for a custom fused kernel:
         if self.fused_mlp_func is not None:
+            # Omitted details: you'd call your custom fused kernel here
             return self.drop(self.fused_mlp_func(
-                x=x, weight1=self.fc1.weight, weight2=self.fc2.weight, bias1=self.fc1.bias, bias2=self.fc2.bias,
-                activation='gelu_approx', save_pre_act=self.training, return_residual=False, checkpoint_lvl=0,
-                heuristic=0, process_group=None,
+                x=x,
+                weight1=self.fc1.weight, weight2=self.fc2.weight,
+                bias1=self.fc1.bias,   bias2=self.fc2.bias,
+                activation='gelu_approx',
+                save_pre_act=self.training, return_residual=False,
+                checkpoint_lvl=0, heuristic=0, process_group=None,
             ))
         else:
-            #torch.set_printoptions(threshold=100, edgeitems=10)
-            #print('output FFN', self.drop(self.fc2( self.act(self.fc1(x)))))
-            # global print_first_ffn
-            # if print_first_ffn:
-            #     print('output fc1', self.fc1(x).sum())
-            #     print('output activation', self.act(self.fc1(x)).sum())
-            #     print('output fc2', self.fc2( self.act(self.fc1(x))).sum())
-            #     print('SUm of biases fc1 = {:.20f}'.format( self.fc1.bias.sum().item()))
-            #     print('SUm of biases fc2 = {:.20f}'.format( self.fc2.bias.sum().item()))
-            #     print("fc1 weight sum = {:.20f}".format(self.fc1.weight.sum().item()))
-            #     print("fc2 weight sum = {:.20f}".format(self.fc2.weight.sum().item()))
-            #     print_first_ffn = False
-            return self.drop(self.fc2( self.act(self.fc1(x)) ))
-    
+            # Standard forward pass
+            hidden_activated = self.act(self.fc1(x))  # shape: [batch_size, seq_len, hidden_dim], e.g. [64, 256, 4096]
+
+            # If tracking stats, sum over batch+seq to get a [hidden_dim]-shaped statistic
+            if self.track_activation_stats:
+                with torch.no_grad():
+                    # Sum over BOTH batch and sequence dimensions => shape [hidden_dim]
+                    batch_sum = hidden_activated.sum(dim=(0, 1))  # shape [hidden_dim]
+                    # print(
+                    #     f"x shape={x.shape}, hidden_activated shape={hidden_activated.shape}, "
+                    #     f"batch_sum shape={batch_sum.shape}, "
+                    #     f"fc1.weight shape={self.fc1.weight.shape}, fc2.weight shape={self.fc2.weight.shape}"
+                    # )
+
+                    # Accumulate
+                    if (batch_sum.numel() == self.fc1.out_features):  # e.g. == hidden_dim
+                        if self.sum_activations_list is None:
+                            self.sum_activations_list = batch_sum.cpu()
+                        else:
+                            self.sum_activations_list += batch_sum.cpu()
+
+                        # Count how many items contributed to the sum
+                        # Example: if hidden_activated is [batch=64, seq=256, hidden=4096],
+                        # then the total items for each neuron is 64 * 256 = 16384
+                        
+                        self.count_activations_value += (hidden_activated.shape[0] *
+                                                            hidden_activated.shape[1])
+                        
+
+            return self.drop(self.fc2(hidden_activated))
+
+    def prune_by_least_impact(self, pct_remove: float = 0.1):
+        """
+        Prune the bottom 'pct_remove' fraction of neurons (by average activation).
+        Example: pct_remove=0.1 => remove the 10% of neurons with the lowest average activation.
+        """
+        if self.sum_activations_list is None or self.count_activations_value == 0:
+            print("No recorded stats; skipping pruning.")
+            return
+
+        # Compute average activation for each neuron
+        avg_activations = self.sum_activations_list / float(self.count_activations_value)
+
+        # Check dimension
+        hidden_dim = avg_activations.numel()  # should match self.fc1.out_features, e.g. 4096
+
+        n_remove = int(hidden_dim * pct_remove)
+        if n_remove >= hidden_dim:
+            print("WARNING: Attempting to prune all neurons or more than exist; skipping pruning.")
+            return
+        if n_remove <= 0:
+            print("Nothing to remove (n_remove <= 0). Try a bigger pct_remove.")
+            return
+
+        # Sort from smallest to largest activation, remove the smallest
+        sorted_indices = torch.argsort(avg_activations, descending=False)
+        remove_idx = sorted_indices[:n_remove]
+        keep_idx = sorted_indices[n_remove:]
+
+        if keep_idx.numel() == 0:
+            print("No neurons left to keep after pruning; skipping pruning.")
+            return
+       
+        print(f"Pruning {n_remove} neurons out of {hidden_dim}.")
+        raise NotImplementedError('')
+
+        self._prune_ffn_layer(keep_idx)
+
+    def _prune_ffn_layer(self, keep_idx: torch.Tensor):
+        """
+        Internal function that prunes rows/columns from fc1/fc2 based on keep_idx.
+        keep_idx should be a list of neuron indices in [0..(hidden_dim-1)].
+        """
+        # fc1: shape [hidden_dim, in_features], fc2: shape [out_features, hidden_dim]
+        w1 = self.fc1.weight.data      # shape [hidden_dim, in_features]
+        b1 = self.fc1.bias.data        # shape [hidden_dim]
+        pruned_w1 = w1[keep_idx, :]
+        pruned_b1 = b1[keep_idx]
+
+        w2 = self.fc2.weight.data      # shape [out_features, hidden_dim]
+        b2 = self.fc2.bias.data        # shape [out_features]
+        pruned_w2 = w2[:, keep_idx]
+
+        # Rebuild new Linear layers
+        in_dim = self.fc1.in_features
+        out_dim = self.fc2.out_features
+        new_hidden_dim = len(keep_idx)
+
+        device = self.fc1.weight.device
+
+        new_fc1 = nn.Linear(in_dim, new_hidden_dim, bias=True).to(device)
+        new_fc2 = nn.Linear(new_hidden_dim, out_dim, bias=True).to(device)
+
+        with torch.no_grad():
+            new_fc1.weight.copy_(pruned_w1)
+            new_fc1.bias.copy_(pruned_b1)
+            new_fc2.weight.copy_(pruned_w2)
+            new_fc2.bias.copy_(b2)
+
+        self.fc1 = new_fc1
+        self.fc2 = new_fc2
+
+        # Reset stats so we don't prune repeatedly on stale data
+        self.track_activation_stats = False
+        self.sum_activations_list = None
+        self.count_activations_value = 0
+
+        
     def extra_repr(self) -> str:
         return f'fused_mlp_func={self.fused_mlp_func is not None}'
 
@@ -212,7 +320,7 @@ class AdaLNSelfAttn(nn.Module):
         #     print('output ffn', temp.sum())
         # Pre-compute the ffn input once (same as before)
         ffn_input = self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2)
-        with record_function("FFN_Call"):
+        with record_function("FFN_Call_VAR"):
             ffn_output = self.ffn(ffn_input)
 
         # Then complete the rest of the computation:

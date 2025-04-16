@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --partition=gpu
+#SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
 #SBATCH --job-name=RunScript
 #SBATCH --ntasks=1
@@ -25,6 +25,7 @@ source user.env
 eval "$(conda shell.bash hook)"
 conda activate effbench_env
 
+#conda env export > environment_test.yml
 #pip install --no-cache-dir plotly
 # pip uninstall torch-fidelity
 # pip install -e git+https://github.com/LTH14/torch-fidelity.git@master#egg=torch-fidelity
@@ -34,5 +35,5 @@ conda activate effbench_env
 
 #pip install wandb
 # wandb login 94c83d220ddc780120eaa22226adf6730f644c6c
-
+#export TRITON_LOG_LEVEL=DEBUG
 python -m scripts.$1

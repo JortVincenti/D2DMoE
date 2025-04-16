@@ -127,7 +127,7 @@ def main():
     # expert_split_args.model_args.expert_size = 32
     # expert_split_args.model_args.expert_size = 24
     # expert_split_args.model_args.expert_size = 12
-    expert_split_args.model_args.expert_size = 8 #6
+    expert_split_args.model_args.expert_size = 32 #6
     expert_split_args.model_args.experts_class = 'custom_kernel' #'execute_all'
     expert_split_args.activation = None
     expert_split_args.final_path_save = 'base_moe'
@@ -140,10 +140,10 @@ def main():
         exp_name, run_name = generate_run_name(args)
         args.base_on = exp_name
         base_run_name = f'{exp_id}'
-        # executor.update_parameters(slurm_additional_parameters={})
-        # job = submit_job(executor, dsti_expert_split, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
-        # jobs.append(job)
-        # run_to_job_map[run_name] = job
+        executor.update_parameters(slurm_additional_parameters={})
+        job = submit_job(executor, dsti_expert_split, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
+        jobs.append(job)
+        run_to_job_map[run_name] = job
 
     exp_names.append(exp_name)
     base_split_exp_names.append(exp_names[-1])

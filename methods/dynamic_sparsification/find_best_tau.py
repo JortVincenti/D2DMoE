@@ -120,14 +120,10 @@ def setup_model(args, tc):
     tc.model = tc.accelerator.prepare(model)
 
 
-
-def build_mini_dataset(folder_dataset, num_classes=1000):
+def build_mini_dataset(folder_dataset, num_classes=256):
     """
-    folder_dataset: a torchvision.datasets.DatasetFolder or ImageFolder object
-                    with .samples = [(filepath, class_index), ...].
-    num_classes: how many classes you want to collect.
-    
-    Returns a Subset with exactly one sample per class (or until you reach num_classes).
+    Returns a Subset with up to `num_classes` distinct class indices
+    from the original ImageFolder/FolderDataset.
     """
     seen_classes = set()
     selected_indices = []
@@ -143,141 +139,236 @@ def build_mini_dataset(folder_dataset, num_classes=1000):
     return Subset(folder_dataset, selected_indices)
 
 
-
-def objective(trial, args, tc, mini_loader):
+def objective(param_dict, tc, mini_loader):
     """
-    Evaluates a set of tau parameters over all batches in mini_loader.
-    Returns a multi-objective tuple: (final_loss, total_experts).
+    param_dict is a dictionary like: {
+        "tau_0": <val>, "tau_1": <val>, ...
+    }
+    Returns a tuple: (final_loss, final_experts/1e7)
     """
-
-    # 1) Build tau_list: first 5 are constant 1.0; next 5 are non-increasing from [0.1, prev_tau].
-    tau_list = [1.0] * 5
-    prev_tau = 1.0
+    # 1) Gather the 5 tau_i from the dictionary
+    tau_list = [1.0]*5  # Suppose first 5 positions are fixed=1.0
     for i in range(5):
-        # Set lower bound: first iteration uses 0.9; others use -1.0
-        lower_bound = prev_tau - 0.1
-        # Suggest a float in the range [lower_bound, prev_tau]
-        tau_val = trial.suggest_float(f"tau_{i}", lower_bound, prev_tau)
+        tau_val = param_dict[f"tau_{i}"]
         tau_list.append(tau_val)
-        # Update prev_tau to the new value for the next iteration
-        prev_tau = tau_val
-    
-    # 2) Configure your model to use the chosen tau_list
+
+    # 2) Configure your model using these tau values
     for b in tc.model.blocks:
-        b.ffn.forward_mode = 'oracle'
+        b.ffn.forward_mode = 'dynk_max'
         b.ffn.tau = tau_list
         b.ffn.experts.forward_mode = 'triton_atomic'
     
-    # 3) Prepare to accumulate metrics across multiple batches
+    # Prepare to accumulate metrics
+    train_loss = nn.CrossEntropyLoss(reduction='none')
+    moe_modules = [
+        m for b in tc.model.blocks
+        for m in b.modules()
+        if hasattr(m, 'gate') and hasattr(m, 'router')
+    ]
+
     all_losses = []
     all_experts = []
 
-    # Pre-compute the patch-based scale weighting
-    num_scales = len(args.patch_nums)
-    if num_scales > 5:
-        # E.g. first 5 scales get 0 weight, then linearly from 1.0 to 2.0
-        high_scales = [1.0] * 5 #torch.linspace(1.0, 2.0, steps=num_scales - 5).tolist()
-        scale_factors = [0.0] * 5 + high_scales
-    else:
-        scale_factors = [0.0] * num_scales
+    # Set seeds, ensure deterministic operations, etc.
+    seed = 0
+    torch.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
-    weight_list = []
-    for i, pn in enumerate(args.patch_nums):
-        num_patches = pn * pn
-        factor = scale_factors[i]
-        weight_list.append(torch.full((num_patches,), factor, device=args.device))
+    tf32 = True
+    torch.backends.cudnn.allow_tf32 = bool(tf32)
+    torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
+    torch.set_float32_matmul_precision('high' if tf32 else 'highest')
+    tc.model.rng.manual_seed(seed)
 
-    loss_weight = torch.cat(weight_list, dim=0)
-    loss_weight = loss_weight / loss_weight.sum()  # normalize
-    loss_weight = loss_weight.unsqueeze(0)         # (1, L)
-
-    train_loss = nn.CrossEntropyLoss(reduction='none')
-
-    moe_modules = [m for b in tc.model.blocks
-                    for m in b.modules()
-                    if hasattr(m, 'gate') and hasattr(m, 'router')]
-
-    # 4) Loop over each batch in mini_loader
+    # 3) Loop over the mini_loader to get average loss & average experts
+    tc.model.eval()
     for X, y in mini_loader:
+        B, V = y.shape[0], tc.model_vae.vocab_size
+        X = X.to(dist.get_device(), non_blocking=True)
+        label_B = y.to(dist.get_device(), non_blocking=True)
 
-        with torch.no_grad():
-            B, V = y.shape[0], tc.model_vae.vocab_size
-            X = X.to(dist.get_device(), non_blocking=True)
-            label_B = y.to(dist.get_device(), non_blocking=True)
-            gt_idx_Bl: List[ITen] = tc.model_vae.img_to_idxBl(X)  # shape is list of patch indices
-            gt_BL = torch.cat(gt_idx_Bl, dim=1)                   # (B, L)
-            x_BLCv_wo_first_l: Ten = tc.model_vae.quantize.idxBl_to_var_input(gt_idx_Bl)
-            logits = tc.model(label_B, x_BLCv_wo_first_l)         # shape: (B, L, V)
+        gt_idx_Bl = tc.model_vae.img_to_idxBl(X)
+        gt_BL = torch.cat(gt_idx_Bl, dim=1)
+        x_BLCv_wo_first_l = tc.model_vae.quantize.idxBl_to_var_input(gt_idx_Bl)
 
-        # Compute patch-based cross-entropy and apply weighting
+        logits = tc.model(label_B, x_BLCv_wo_first_l)
+
         batch_task_loss = train_loss(
             logits.view(-1, V),
             gt_BL.view(-1)
-        ).view(B, -1)  # => (B, L)
-        
-        batch_task_loss = (batch_task_loss * loss_weight).sum(dim=-1).mean()  
-        # shape: (B, L) -> (B,) -> final single scalar for this batch
+        ).view(B, -1)
 
-        # Measure "experts used" for this batch
+        batch_task_loss = batch_task_loss.mean()
+
+        # measure "experts used" for this batch
         batch_experts = sum(moex.routing_mask.clone().sum() for moex in moe_modules)
 
         all_losses.append(batch_task_loss.item())
         all_experts.append(batch_experts)
 
-    # 5) Average final metrics across all batches in mini_loader
     final_loss = float(sum(all_losses) / len(all_losses))
     final_experts = float(sum(all_experts) / len(all_experts))
 
-    return (final_loss, final_experts/10000000)
+    # 4) Return a tuple of objectives
+    return (final_loss, final_experts)
+    #return (final_loss, final_experts/1e7)
 
 
+# -------------------------------------------------
+# Helper to build valid tau combos for the grid
+# -------------------------------------------------
+def build_valid_tau_grid():
+    """
+    Generates valid combos with tau_0 >= tau_1 >= tau_2 >= tau_3 >= tau_4,
+    each tau_i in [1.00 .. 0.70] stepping by 0.01
+    """
+    values = np.arange(1.0, 0.7, -0.02)
+    candidate_values = [round(float(v), 2) for v in values]
+    valid_grid = []
+    valid_grid.append({
+        "tau_0": 1.0,
+        "tau_1": 1.0,
+        "tau_2": 1.0,
+        "tau_3": 1.0,
+        "tau_4": 1.0
+    })
+    for t0 in candidate_values:
+        for t1 in candidate_values:
+            if t1 > t0:
+                continue
+            for t2 in candidate_values:
+                if t2 > t1:
+                    continue
+                for t3 in candidate_values:
+                    if t3 > t2:
+                        continue
+                    for t4 in candidate_values:
+                        if t4 > t3:
+                            continue
+                        valid_grid.append({
+                            "tau_0": t0,
+                            "tau_1": t1,
+                            "tau_2": t2,
+                            "tau_3": t3,
+                            "tau_4": t4
+                        })
 
-def plot_all_trials_interactive(study):
-    # Create an interactive Pareto front plot using Optuna's visualization API.
-    fig = vis.plot_pareto_front(study)
+
+    return valid_grid
+
+
+# -------------------------------------------------
+# Compute 2D Pareto front for (loss, experts)
+# -------------------------------------------------
+def compute_pareto_front(results):
+    """
+    Given a list of dicts like:
+      {
+        'params': {...},
+        'values': (loss, experts)
+      }
+    Return a sub-list of all non-dominated solutions in 'results'.
     
-    # Build custom hover text for each trial (showing the τ parameters)
-    custom_texts = []
-    for trial in study.trials:
-        if trial.values is not None and trial.params:
-            # Create a string with τ parameters, e.g., "tau_0=0.875, tau_1=0.840, ..."
-            tau_text = ", ".join(
-                f"{key}={trial.params[key]:.3f}" for key in trial.params if key.startswith("tau")
-            )
-            custom_texts.append(tau_text)
-        else:
-            custom_texts.append("")
-    
-    # Update the figure traces with the custom hover text.
-    fig.update_traces(
-        text=custom_texts,
-        hovertemplate="%{text}<extra></extra>"
+    A solution A is dominated by B if:
+      B.loss <= A.loss AND B.experts <= A.experts
+      (with at least one strict inequality)
+    """
+    pareto_solutions = []
+    for rA in results:
+        (lossA, expertsA) = rA['values']
+        dominated = False
+        for rB in results:
+            (lossB, expertsB) = rB['values']
+            if (lossB <= lossA and expertsB <= expertsA) and (lossB < lossA or expertsB < expertsA):
+                # rA is dominated by rB
+                dominated = True
+                break
+        if not dominated:
+            pareto_solutions.append(rA)
+    return pareto_solutions
+
+
+# -------------------------------------------------
+# Plot results in an interactive scatter
+# -------------------------------------------------
+def plot_all_results_interactive(results):
+    """
+    Creates an interactive Plotly scatter, showing each (loss, experts).
+    We'll embed textual info about the tau parameters in the hover.
+    """
+    # Convert results to arrays for plotting
+    xvals = []
+    yvals = []
+    hover_texts = []
+
+    for res in results:
+        (loss, experts) = res['values']
+        xvals.append(loss)
+        yvals.append(experts)
+        param_dict = res['params']
+        # Build a string like "tau_0=1.00, tau_1=0.95, ..."
+        tau_text = ", ".join(
+            f"{k}={param_dict[k]:.2f}"
+            for k in sorted(param_dict.keys())
+            if k.startswith("tau_")
+        )
+        hover_texts.append(tau_text)
+
+    fig = go.Figure(
+        data=go.Scatter(
+            x=xvals,
+            y=yvals,
+            mode='markers',
+            text=hover_texts,
+            hovertemplate="%{text}<extra></extra>"
+        )
     )
-    
-    # Save the interactive plot as an HTML file.
-    fig.write_html("Images/optuna_pareto_CE.html")
-    del fig
+
+    fig.update_layout(
+        title="Pareto Scatter: (loss vs. experts)",
+        xaxis_title="Loss",
+        yaxis_title="Experts / 1e7"
+    )
+    fig.write_html("Images/pareto_CE.html")
+    print("Wrote interactive plot to Images/pareto_CE.html.")
 
 
+# -------------------------------------------------
+# Main training loop with grid search
+# -------------------------------------------------
 def training_loop(args, tc):
-    mini_dataset = build_mini_dataset(tc.train_loader.dataset, num_classes=128)
-    mini_loader = torch.utils.data.DataLoader(mini_dataset, batch_size=args.batch_size, shuffle=False)
-    # Multi-objective: minimize both loss and number of experts
-    study = optuna.create_study(directions=["minimize", "minimize"])
+    """
+    Replaces the Optuna usage by manually iterating over a param grid.
+    Then collects results, plots them, and reports Pareto-optimal solutions.
+    """
+    # 1) Build a small "mini" dataset for quick evaluation
+    mini_dataset = build_mini_dataset(tc.train_loader.dataset, num_classes=16)
+    mini_loader = torch.utils.data.DataLoader(mini_dataset, batch_size=16, shuffle=False)
 
-    # We'll do 5 trials => 5 times we pick a new tau_list, run 1 batch, measure (loss, experts)
-    study.optimize(lambda trial: objective(trial, args, tc, mini_loader), n_trials=2500)
+    # 2) Generate only valid combos => no pruning needed
+    valid_grid = build_valid_tau_grid()
 
-    plot_all_trials_interactive(study)
-    # After 5 single-batch runs, you have up to 5 solutions. 
-    # Some might be "Pareto optimal".
-    best_trials = study.best_trials
-    print("Number of Pareto-optimal solutions:", len(best_trials))
+    # 3) Evaluate each param combination
+    results = []
+    for param_dict in valid_grid:
+        vals = objective(param_dict, tc, mini_loader)
+        print(f'Run done for {param_dict} with results {vals}')
+        results.append({
+            'params': param_dict,
+            'values': vals  # (loss, experts)
+        })
 
-    for i, t in enumerate(best_trials):
-        print(f"Pareto solution {i}: values={t.values}, params={t.params}")
+    # 4) Produce the same style of interactive Pareto scatter
+    #plot_all_results_interactive(results)
 
-
+    # 5) Find and print the Pareto-optimal solutions
+    pareto_solutions = compute_pareto_front(results)
+    print("Number of Pareto-optimal solutions:", len(pareto_solutions))
+    for i, sol in enumerate(pareto_solutions):
+        print(f"Pareto solution {i}: values={sol['values']}, params={sol['params']}")
 
 def train(args):
     logging.basicConfig(

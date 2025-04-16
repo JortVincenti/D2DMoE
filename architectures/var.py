@@ -245,7 +245,7 @@ class VAR(nn.Module):
             if self.prog_si == 0: x_BLC = sos
             else: x_BLC = torch.cat((sos, self.word_embed(x_BLCv_wo_first_l.float())), dim=1)
             x_BLC += self.lvl_embed(self.lvl_1L[:, :ed].expand(B, -1)) + self.pos_1LC[:, :ed] # lvl: BLC;  pos: 1LC
-        
+    
         attn_bias = self.attn_bias_for_masking[:, :, :ed, :ed]
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
         

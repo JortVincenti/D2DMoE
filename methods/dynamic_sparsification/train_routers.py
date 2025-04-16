@@ -9,7 +9,7 @@ from torch import nn
 from architectures.moe.moe_layers import ExecuteAllExperts, CustomKernelExperts
 from architectures.moe.moefication import add_routers, MoeficationMoE
 from common import get_default_args, INIT_NAME_MAP, LOSS_NAME_MAP
-from eval import benchmark_moe, online_evaluate_moe, score_moe, autoregressive_infer_cfg_with_expert_plot, autoregressive_infer_cfg_test
+from eval import benchmark_moe, online_evaluate_moe, score_moe, autoregressive_infer_cfg_with_expert_plot
 from train import TrainingContext, setup_accelerator, setup_data, setup_optimization, setup_files_and_logging, \
     setup_state, make_vae
 from utils import load_model, save_state, remove_hooks, save_final, Mixup, get_lrs, \
@@ -117,6 +117,7 @@ def setup_model(args, tc):
     # Base class
     model, tc.model_vae = get_var_d16()
     tc.initial_model = copy.deepcopy(model)
+
     #_ , debug_data = make_image(tc.initial_model, args)
 
     if args.activation in ['gelu', 'relu']:
@@ -195,6 +196,7 @@ def setup_model(args, tc):
         
     if args.fid:
         for tau in args.dsti_tau_to_eval:
+            print('tau', tau)
             seed = 0
             torch.manual_seed(seed)
             random.seed(seed)
@@ -223,23 +225,29 @@ def setup_model(args, tc):
             )
 
             if args.use_router:
-                forward_mode = 'dynk_max'
+                forward_mode = 'dynk_max' #'centroids'
             else:
-                forward_mode = 'oracle'
+                forward_mode = 'oracle' #'centroids' 
 
             sample_folder  = f'../../../../scratch-shared/jvincenti/{args.final_path_save}_with_router_{args.use_router}_tau_{tau}_samples_256x256'  # Where to save the 50,000 PNGs
             sample_folder_var = f'../../../../scratch-shared/jvincenti/base_var_tau_{tau}_samples_256x256'
-            
-            os.makedirs(sample_folder, exist_ok=True)
-            if args.final_path_save =='base_data_moe' and tau == 1.0: 
-                os.makedirs(sample_folder_var, exist_ok=True)
-            # Check if directory exists
+
+            print(sample_folder,'sample_folder')
+
             num_classes        = 1000               #  1000 ImageNet classes
             samples_per_class  = 10                 #  10k total
             cfg                = 1.5
             top_p              = 0.96
             top_k              = 900
             more_smooth        = False
+   
+            output_dir = f'CUDA_Profile_tensorboard/{args.final_path_save}'
+            os.makedirs(output_dir, exist_ok=True)
+
+
+            os.makedirs(sample_folder, exist_ok=True)
+            if args.final_path_save =='base_data_moe' and tau == 1.0: 
+                os.makedirs(sample_folder_var, exist_ok=True)
 
             # Assume num_classes and samples_per_class are defined.
             # Create a list of labels: each class is repeated samples_per_class times.
@@ -249,7 +257,7 @@ def setup_model(args, tc):
             all_labels = np.array(all_labels)
 
             # Define your new batch size B (which can be greater than samples_per_class)
-            B = 32  # e.g., B = 64
+            B = args.batch_size_eff  # e.g., B = 128
 
             num_total_samples = len(all_labels)
             num_batches = num_total_samples // B
@@ -266,117 +274,88 @@ def setup_model(args, tc):
             output_dir = f'CUDA_Profile_tensorboard/{args.final_path_save}'
             os.makedirs(output_dir, exist_ok=True)
 
-            with profile(
-                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                schedule=torch.profiler.schedule(
-                    skip_first=5,
-                    wait=2,
-                    warmup=2,
-                    active=1,
-                    repeat=1
-                    ),
-                on_trace_ready=tensorboard_trace_handler(output_dir),
-                record_shapes=True,
-                profile_memory=True
-            ) as prof:
-                for batch_idx in range(num_batches):
-                    # Create label_B for the batch: a combination of class indices.
-                    batch_labels = all_labels[batch_idx * B : (batch_idx + 1) * B]
-                    label_B = torch.tensor(batch_labels, device='cuda')
-                    
-                    # Autoregressive sampling with batch size B.
-                    with torch.no_grad():
-                        with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):
-                            if args.final_path_save =='base_data_moe' and isinstance(tau, float) and tau == 1.0:
-                                recon_B3HW_var, _, = tc.initial_model.autoregressive_infer_cfg(B=B, label_B=label_B, cfg=cfg, top_k=top_k, 
-                                top_p=top_p, g_seed=seed, more_smooth=more_smooth, plotting_PCA=False, rng=rng_2)
+            TOTAL_PROFILER_STEPS = 5 + 2 + 2 + 1  # Equals 10
+            
+            # with profile(
+            #     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            #     schedule=torch.profiler.schedule(
+            #         skip_first=5,
+            #         wait=2,
+            #         warmup=2,
+            #         active=1,
+            #         repeat=1
+            #         ),
+            #     on_trace_ready=tensorboard_trace_handler(output_dir, worker_name=f"{args.model_experts_size}_{tau}"),
+            #     record_shapes=True,
+            #     profile_memory=True
+            # ) as prof:
+            for batch_idx in range(num_batches):
+                # Create label_B for the batch: a combination of class indices.
+                batch_labels = all_labels[batch_idx * B : (batch_idx + 1) * B]
+                label_B = torch.tensor(batch_labels, device='cuda')
+                
+                # Autoregressive sampling with batch size B.
+                with torch.no_grad():
+                    with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):
+                            if args.dsti_tau_as_list:
+                                recon_B3HW, mean_flops, total_flops = autoregressive_infer_cfg_with_expert_plot(
+                                    tc=tc, B=B, label_B=label_B, cfg=cfg, top_k=top_k, top_p=top_p,
+                                    rng=rng, more_smooth=more_smooth, tau=1.0, debug_data=None,
+                                    compare_dicts=False, type_of_model=type_of_model, final_path_save=None, forward_mode=forward_mode,
+                                    taus = tau, expert_index_switch = args.expert_index_switch
+                                )
                             else:
-                                if args.dsti_tau_as_list:
-                                    recon_B3HW, mean_flops, total_flops = autoregressive_infer_cfg_with_expert_plot(
-                                        tc=tc, B=B, label_B=label_B, cfg=cfg, top_k=top_k, top_p=top_p,
-                                        rng=rng, more_smooth=more_smooth, tau=1.0, debug_data=None,
-                                        compare_dicts=False, type_of_model=type_of_model, final_path_save=None, forward_mode=forward_mode,
-                                        taus = tau
-                                    )
-                                else:
-                                    recon_B3HW, mean_flops, total_flops = autoregressive_infer_cfg_with_expert_plot(
-                                        tc=tc, B=B, label_B=label_B, cfg=cfg, top_k=top_k, top_p=top_p,
-                                        rng=rng, more_smooth=more_smooth, tau=tau, debug_data=None,
-                                        compare_dicts=False, type_of_model=type_of_model, final_path_save=None, forward_mode=forward_mode,
-                                        taus = False
-                                    )
-                                final_mean_flops += mean_flops
-                                final_flops += total_flops
-                    torch.cuda.synchronize()
-                    prof.step()
+                                recon_B3HW, mean_flops, total_flops = autoregressive_infer_cfg_with_expert_plot(
+                                    tc=tc, B=B, label_B=label_B, cfg=cfg, top_k=top_k, top_p=top_p,
+                                    rng=rng, more_smooth=more_smooth, tau=tau, debug_data=None,
+                                    compare_dicts=False, type_of_model=type_of_model, final_path_save=None, forward_mode=forward_mode,
+                                    taus = False, expert_index_switch = args.expert_index_switch
+                                )
+                            final_mean_flops += mean_flops
+                            final_flops += total_flops
+                    # torch.cuda.synchronize()
+                    # prof.step()
+                    
+                    # if batch_idx + 1 >= TOTAL_PROFILER_STEPS:
+                    #     break
 
-                    if args.final_path_save =='base_data_moe' and tau == 1.0:
-                        for i in range(B):
-                            img_tensor = recon_B3HW_var[i].detach().cpu()
-                            img_array = (img_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-                            img_pil = Image.fromarray(img_array)
-                            global_idx = batch_idx * B + i
-                            filename = f"class_{batch_labels[i]:04d}_{global_idx:05d}.png"
-                            img_pil.save(os.path.join(sample_folder_var, filename))
-                    else:
-                        for i in range(B):
-                            img_tensor = recon_B3HW[i].detach().cpu()
-                            img_array = (img_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-                            img_pil = Image.fromarray(img_array)
-                            global_idx = batch_idx * B + i
-                            filename = f"class_{batch_labels[i]:04d}_{global_idx:05d}.png"
-                            img_pil.save(os.path.join(sample_folder, filename))
+                    batch_images = recon_B3HW.detach().cpu()  # shape: (B, C, H, W)
+                    # Convert the full batch: move channel to last dimension, scale, and cast
+                    np_images = (batch_images.permute(0, 2, 3, 1).numpy() * 255).astype(np.uint8)
+                    for i, img_array in enumerate(np_images):
+                        img_pil = Image.fromarray(img_array)
+                        global_idx = batch_idx * B + i
+                        filename = f"class_{batch_labels[i]:04d}_{global_idx:05d}.png"
+                        img_pil.save(os.path.join(sample_folder, filename))
 
 
-            if args.final_path_save =='base_data_moe' and tau == 1.0:
-                fid_statistics_file = 'adm_in256_stats.npz'
-                metrics_dict = torch_fidelity.calculate_metrics(
-                    input1=sample_folder_var,
-                    input2=None,
-                    fid_statistics_file=fid_statistics_file,
-                    cuda=True,
-                    isc=True,
-                    fid=True,
-                    kid=False,
-                    prc=False,
-                    verbose=False,
-                )
-                print("*"*100)
-                print(f'Final Fid for {tau} with base VAR')
-                print(metrics_dict)
-                # print('Total Flops per sample', final_flops)
-                # print('Average Flops per sample', final_mean_flops)
-                #print('batch_time_base', batch_time_base)
-                print("*"*100)
-                shutil.rmtree(sample_folder_var)                
-            else:             
-                #print(f"Done! Images saved to: {sample_folder}")
-                final_flops = final_flops/(num_batches*2*B)
-                final_mean_flops = final_mean_flops/num_batches
-                # Now calculate_metrics:
-                input2 = None
-                fid_statistics_file = 'adm_in256_stats.npz'
 
-                metrics_dict = torch_fidelity.calculate_metrics(
-                    input1=sample_folder,
-                    input2=input2,
-                    fid_statistics_file=fid_statistics_file,
-                    cuda=True,
-                    isc=True,
-                    fid=True,
-                    kid=False,
-                    prc=False,
-                    verbose=False,
-                )
-                print("*"*100)
-                print(f'Final Fid for {tau}', args.final_path_save)
-                print(metrics_dict)
-                print('Total Flops per sample', final_flops)
-                print('Average Flops per sample', final_mean_flops)
-                # print(f"Batch generation took {batch_time:.6f} seconds")
-                print("*"*100)
-                shutil.rmtree(sample_folder)
+        #print(f"Done! Images saved to: {sample_folder}")
+        final_flops = final_flops/(num_batches*2*B)
+        final_mean_flops = final_mean_flops/num_batches
+        # Now calculate_metrics:
+        input2 = None
+        fid_statistics_file = 'adm_in256_stats.npz'
 
+        metrics_dict = torch_fidelity.calculate_metrics(
+            input1=sample_folder,
+            input2=input2,
+            fid_statistics_file=fid_statistics_file,
+            cuda=True,
+            isc=True,
+            fid=True,
+            kid=False,
+            prc=False,
+            verbose=False,
+        )
+        print("*"*100)
+        print(f'Final Fid for {tau}', args.final_path_save)
+        print(metrics_dict)
+        print('Total Flops per sample', final_flops)
+        print('Average Flops per sample', final_mean_flops)
+        # print(f"Batch generation took {batch_time:.6f} seconds")
+        print("*"*100)
+        shutil.rmtree(sample_folder)
 
     if args.debug:
         raise ValueError("args.debug is true therefore stopping here.")

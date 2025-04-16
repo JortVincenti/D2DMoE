@@ -81,7 +81,7 @@ def moe_vit_block_forward(self, input: torch.Tensor):
     return x + y, gating_data
 
 
-def moe_var_block_forward(self, x, cond_BD, attn_bias):
+def moe_var_block_forward(self, x, cond_BD, attn_bias, old_FFN=None):
     gating_data = {}
     # print('-'*50)	
     # print('x:', x.sum())
@@ -142,16 +142,23 @@ def moe_var_block_forward(self, x, cond_BD, attn_bias):
         # else:
         # Pre-compute the ffn input:
         ffn_input = self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2)
-        #with record_function("FFN_Call"):
-        y, ffn_gating_data = self.ffn(ffn_input)
-
+        with record_function("FFN_Call"):
+            if old_FFN:
+                # torch.cuda.synchronize()
+                # start_time = time.time()
+                y = old_FFN(ffn_input)
+                ffn_gating_data = {}
+                # torch.cuda.synchronize()
+                # elapsed = time.time() - start_time
+                # print(f"Time for old-FFN call: {elapsed * 1000.0:.3f} ms")
+            else:
+                y, ffn_gating_data = self.ffn(ffn_input)
 
         # Continue with the rest of the operations:
         x = x + self.drop_path(y.mul(gamma2))
         gating_data.update(ffn_gating_data)
     else:
         x = x + self.drop_path(self.ffn(self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2)).mul(gamma2))
-
 
     return x, gating_data
 

@@ -14,28 +14,28 @@ already available
 on the system, please use 'module avail' or 'module spider' to search for it.
 ============================================================================================== 
 [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
-[03-28 20:55:23] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
-[03-28 20:55:23] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
-[03-28 20:55:23] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
-[03-28 20:55:23] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
-[03-28 20:55:23] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
-[03-28 20:55:23] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
-[03-28 20:55:23] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
-[03-28 20:55:23] (dmoe_var_baseline_fid.py, line 253)=> Exp names: ['TINYIMAGENET_PATH_dsti_expert_split_JNCAPL4L', 'TINYIMAGENET_PATH_dsti_router_D35AYFWV']
-[03-28 20:55:23] (dmoe_var_baseline_fid.py, line 254)=> Display names: ['DSTI expert split', 'DSTI']
-[03-28 20:55:23] (dmoe_var_baseline_fid.py, line 255)=> SLURM JIDs: ['10864448']
+[04-14 21:59:47] (jvincenti/D2DMoE/dist.py, line  28)=> [dist initialize] env variable "RANK" is not set, use cuda:0 as the device
+[04-14 21:59:47] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[04-14 21:59:47] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[04-14 21:59:47] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[04-14 21:59:47] (oE/utils_var/arg_util.py, line 178)=> [tf32] [precis] torch.get_float32_matmul_precision(): high
+[04-14 21:59:47] (oE/utils_var/arg_util.py, line 179)=> [tf32] [ conv ] torch.backends.cudnn.allow_tf32: True
+[04-14 21:59:47] (oE/utils_var/arg_util.py, line 180)=> [tf32] [matmul] torch.backends.cuda.matmul.allow_tf32: True
+[04-14 21:59:52] (dmoe_var_baseline_fid.py, line 265)=> Exp names: ['TINYIMAGENET_PATH_dsti_expert_split_XO3N5DCB', 'TINYIMAGENET_PATH_dsti_router_B4OXHKJB']
+[04-14 21:59:52] (dmoe_var_baseline_fid.py, line 266)=> Display names: ['DSTI expert split', 'DSTI']
+[04-14 21:59:52] (dmoe_var_baseline_fid.py, line 267)=> SLURM JIDs: ['11169760']
 
 JOB STATISTICS
 ==============
-Job ID: 10864444
+Job ID: 11169721
 Cluster: snellius
 User/Group: jvincenti/jvincenti
 State: RUNNING
 Nodes: 1
 Cores per node: 18
 CPU Utilized: 00:00:00
-CPU Efficiency: 0.00% of 00:08:06 core-walltime
-Job Wall-clock time: 00:00:27
-Memory Utilized: 0.00 MB (estimated maximum)
+CPU Efficiency: 0.00% of 00:10:12 core-walltime
+Job Wall-clock time: 00:00:34
+Memory Utilized: 0.00 MB
 Memory Efficiency: 0.00% of 120.00 GB (120.00 GB/node)
-WARNING: Efficiency statistics may be misleading for RUNNING jobs.
+WARNING: Efficiency statistics can only be obtained after the job has ended as seff tool is based on the accounting database data.

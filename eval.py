@@ -887,6 +887,7 @@ def autoregressive_infer_cfg_with_expert_plot(
     final_path_save: str = "data",
     forward_mode: str = 'oracle',
     taus = False, 
+    expert_index_switch = 0
 ) -> torch.Tensor:
     """
     Autoregressive inference with CFG and two-pass TAU-based expert selection.
@@ -921,6 +922,7 @@ def autoregressive_infer_cfg_with_expert_plot(
 
     cur_L = 0
     num_scales = len(tc.model.patch_nums)
+    scale_tok = [1, 4, 9, 16, 25, 36, 64, 100, 169, 256]
 
     # Only construct the debug dictionary if requested.
     if compare_dicts:
@@ -954,15 +956,19 @@ def autoregressive_infer_cfg_with_expert_plot(
 
         x = next_token_map  # Autoregressive token input.
         list_of_outputs = []
-        for index, b in enumerate(tc.model.blocks):
-            if taus:
-                b.ffn.tau = taus[si]
+        for index, b in enumerate(tc.model.blocks):            
+            if si < expert_index_switch:
+                x, _ = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None, old_FFN=tc.initial_model.blocks[index].ffn)
             else:
-                b.ffn.tau = tau
-            x, _ = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
+                if taus:
+                    b.ffn.tau = taus[si]
+                else:
+                    b.ffn.tau = tau
+                x, _ = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None, old_FFN=None)
+
             if compare_dicts:
                 list_of_outputs.append(x.clone())
-       
+    
         if compare_dicts:
             predicted_dictionary['x'].append(x.detach().cpu().clone())
             predicted_dictionary['block_output'].append(list_of_outputs)
@@ -973,9 +979,12 @@ def autoregressive_infer_cfg_with_expert_plot(
                 usage_list_for_this_scale.append(moex.routing_mask.clone())  
             predicted_dictionary['experts_per_token'].append(usage_list_for_this_scale)
         
-
-        total_flops += sum(moex.routing_mask.clone().sum() for moex in moe_modules)
-        mean_flops += sum(moex.routing_mask.clone().mean() for moex in moe_modules)
+        if si < expert_index_switch:
+            total_flops += scale_tok[si] * 128
+            mean_flops += 128
+        else:
+            total_flops += sum(moex.routing_mask.clone().sum() for moex in moe_modules)
+            mean_flops += sum(moex.routing_mask.clone().mean() for moex in moe_modules)
         
 
         logits_BlV = tc.model.get_logits(x, cond_BD)
@@ -1113,236 +1122,6 @@ def autoregressive_infer_cfg_with_expert_plot(
     # Restore original MoE gate functions.
     for m in moe_modules:
         m.gate = original_gates[m]
-
-    return tc.model_vae.fhat_to_img(f_hat).add_(1).mul_(0.5), mean_flops, total_flops
-
-
-@torch.no_grad()
-def autoregressive_infer_cfg_test(
-    tc,
-    B: int,
-    label_B: Optional[Union[int, torch.LongTensor]], 
-    g_seed: Optional[int] = None, 
-    cfg: float = 1.5, 
-    top_k: int = 0, 
-    top_p: float = 0.0,
-    rng = 0,
-    more_smooth: bool = False,
-    tau: float = 1.0,
-    debug_data = None, 
-    compare_dicts: bool = False,  # Set to True to collect debug info and perform comparisons.
-    type_of_model: str = "MoE_no_FT",
-    final_path_save: str = "data"
-) -> torch.Tensor:
-    """
-    Autoregressive inference with CFG and two-pass TAU-based expert selection.
-    
-    If compare_dicts is True, the function will:
-      - Construct a predicted_dictionary collecting intermediate tensors.
-      - Perform debug comparisons against debug_data.
-      - Save the predicted_dictionary to a pickle file.
-    
-    Otherwise, the function will only compute and return the final image.
-    """
-
-    # Prepare conditioning tokens and positional embeddings.
-    cond_BD = sos = tc.initial_model.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=tc.initial_model.num_classes)), dim=0))
-    lvl_pos = tc.initial_model.lvl_embed(tc.initial_model.lvl_1L) + tc.initial_model.pos_1LC
-    next_token_map = sos.unsqueeze(1).expand(2 * B, tc.initial_model.first_l, -1) \
-                     + tc.initial_model.pos_start.expand(2 * B, tc.initial_model.first_l, -1) \
-                     + lvl_pos[:, :tc.initial_model.first_l]
-
-    # Initialize latent representation.
-    f_hat = sos.new_zeros(B, tc.initial_model.Cvae, tc.initial_model.patch_nums[-1], tc.initial_model.patch_nums[-1])
-
-    for b in tc.initial_model.blocks:
-        b.attn.kv_caching(True)
-
-
-    cur_L = 0
-    num_scales = len(tc.initial_model.patch_nums)
-
-    # Only construct the debug dictionary if requested.
-    if compare_dicts:
-        predicted_dictionary = {
-            "f_hat": [],
-            "idx_Bl": [],
-            "h_BChw": [],
-            "logits_BlV": [],
-            "ratio": [],
-            'next_token_map': [],
-            'x': [],
-            'cond_BD_or_gss': [],
-            'block_output': [],
-            'experts_per_token': [],
-            'img': [],    
-        }
-
-    # Iterate over scales.
-    total_flops = 0
-    mean_flops = 0
-    for si, pn in enumerate(tc.initial_model.patch_nums):
-        ratio = si / tc.initial_model.num_stages_minus_1
-        if compare_dicts:
-            predicted_dictionary['ratio'].append(ratio)
-        cur_L += pn * pn
-
-        # Compute conditioning for this scale.
-        cond_BD_or_gss = tc.model.shared_ada_lin(cond_BD)
-        if compare_dicts:
-            predicted_dictionary['cond_BD_or_gss'].append(cond_BD_or_gss.detach().cpu().clone())
-
-        x = next_token_map  # Autoregressive token input.
-        list_of_outputs = []
-        for index, b in enumerate(tc.initial_model.blocks):  
-            out = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
-            x = out[0] if isinstance(out, tuple) else out
-            if compare_dicts:
-                list_of_outputs.append(x.clone())
-       
-        if compare_dicts:
-            predicted_dictionary['x'].append(x.detach().cpu().clone())
-            predicted_dictionary['block_output'].append(list_of_outputs)
-            
-            usage_list_for_this_scale = []
-            for idx in range(len(moe_modules)-1):
-                moex = moe_modules[idx]
-                usage_list_for_this_scale.append(moex.routing_mask.clone())  
-            predicted_dictionary['experts_per_token'].append(usage_list_for_this_scale)
-
-
-        logits_BlV = tc.model.get_logits(x, cond_BD)
-        t = cfg * ratio
-        logits_BlV = (1 + t) * logits_BlV[:B] - t * logits_BlV[B:]
-        if compare_dicts:
-            predicted_dictionary['logits_BlV'].append(logits_BlV.detach().cpu().clone())
-
-        idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
-        if compare_dicts:
-            predicted_dictionary['idx_Bl'].append(idx_Bl.detach().cpu().clone())
-       
-        # --- Update latent representation ---        
-        h_BChw = tc.model.vae_quant_proxy[0].embedding(idx_Bl)
-        if compare_dicts:
-            predicted_dictionary['h_BChw'].append(h_BChw.detach().cpu().clone())
-
-        h_BChw = h_BChw.transpose_(1, 2).reshape(B, tc.model.Cvae, pn, pn)
-
-        f_hat, next_token_map = tc.model.vae_quant_proxy[0].get_next_autoregressive_input(si, num_scales, f_hat, h_BChw)
-        if compare_dicts:
-            predicted_dictionary['f_hat'].append(f_hat.clone())
-
-        final_img = tc.model_vae.fhat_to_img(f_hat.clone())
-        img = final_img[0].add_(1).mul_(0.5).permute(1, 2, 0).mul(255).clamp(0,255).cpu().numpy().astype(np.uint8)
-        if compare_dicts:
-            predicted_dictionary['img'].append(img)
-
-        if si != tc.initial_model.num_stages_minus_1:
-            next_token_map = next_token_map.view(B, tc.initial_model.Cvae, -1).transpose(1, 2)
-            next_token_map = tc.model.word_embed(next_token_map) + lvl_pos[:, cur_L:cur_L + tc.initial_model.patch_nums[si + 1] ** 2]     
-            next_token_map = next_token_map.repeat(2, 1, 1)
-            if compare_dicts:
-                predicted_dictionary['next_token_map'].append(next_token_map.detach().cpu().clone())
-
-    for b in tc.initial_model.blocks:
-        b.attn.kv_caching(False)
-
-    # If debug comparisons were requested, run them.
-    if compare_dicts and debug_data is not None:
-        for si, pn in enumerate(tc.model.patch_nums):
-            print()
-            print("-"*50)
-            print(f"[DEBUG] Scale {si} started.")
-            print("-"*50)
-            print()
-
-            if np.allclose(debug_data['ratio'][si], predicted_dictionary['ratio'][si]):
-                print(f"[DEBUG] ratio for scale {si} are correct.")
-            else:
-                print(f"[DEBUG] ratio for scale {si} are incorrect.")
-                print(f"[DEBUG] Expected: {debug_data['ratio'][si]}")
-                print(f"[DEBUG] Got: {predicted_dictionary['ratio'][si]}")
-
-            if np.allclose(debug_data['cond_BD_or_gss'][si].cpu().numpy(), predicted_dictionary['cond_BD_or_gss'][si].cpu().numpy()):
-                print(f"[DEBUG] cond_BD_or_gss for scale {si} are correct.")
-            else:
-                print(f"[DEBUG] cond_BD_or_gss for scale {si} are incorrect.")
-                print(f"[DEBUG] Expected: {debug_data['cond_BD_or_gss'][si]}, sum of expected: {debug_data['cond_BD_or_gss'][si].sum()}")
-                print(f"[DEBUG] Got: {predicted_dictionary['cond_BD_or_gss'][si].cpu().numpy()}, sum of got: {predicted_dictionary['cond_BD_or_gss'][si].cpu().numpy().sum()}")
-                print(f"[DEBUG] max difference: {max_difference(debug_data['cond_BD_or_gss'][si], predicted_dictionary['cond_BD_or_gss'][si].cpu().numpy())}")
-
-            if np.allclose(debug_data['x'][si].cpu().numpy(), predicted_dictionary['x'][si].cpu().numpy()):
-                print(f"[DEBUG] x for scale {si} are correct.")
-            else:
-                print(f"[DEBUG] x for scale {si} are incorrect.")
-                print(f"[DEBUG] sum of expected: {debug_data['x'][si].sum()}")
-                print(f"[DEBUG] sum of got: { predicted_dictionary['x'][si].cpu().numpy().sum()}")
-                print(f"[DEBUG] max difference: {max_difference(debug_data['x'][si],  predicted_dictionary['x'][si].cpu().numpy())}")
-            
-            if np.allclose(debug_data['logits_BlV'][si].cpu().numpy(), predicted_dictionary['logits_BlV'][si].cpu().numpy()):
-                print(f"[DEBUG] logits_BlV for scale {si} are correct.")
-            else:
-                print(f"[DEBUG] logits_BlV for scale {si} are incorrect.")
-                print(f"[DEBUG] sum of expected: {debug_data['logits_BlV'][si].sum()}")
-                print(f"[DEBUG] sum of got: {predicted_dictionary['logits_BlV'][si].cpu().numpy().sum()}")
-                print(f"[DEBUG] max difference: {max_difference(debug_data['logits_BlV'][si], predicted_dictionary['logits_BlV'][si].cpu().numpy())}")
-
-            if np.allclose(debug_data['idx_Bl'][si].cpu().numpy(), predicted_dictionary['idx_Bl'][si].cpu().numpy()):
-                print(f"[DEBUG] idx_Bl for scale {si} are correct.")
-            else:
-                print(f"[DEBUG] idx_Bl for scale {si} are incorrect.")
-                print(f"[DEBUG] sum of expected: {debug_data['idx_Bl'][si].sum()}")
-                print(f"[DEBUG] sum of got: {predicted_dictionary['idx_Bl'][si].cpu().numpy().sum()}")
-                print(f"[DEBUG] max difference: {max_difference(debug_data['idx_Bl'][si], predicted_dictionary['idx_Bl'][si].cpu().numpy())}")
-
-            if np.allclose(debug_data['h_BChw'][si].cpu().numpy(), predicted_dictionary['h_BChw'][si].cpu().numpy()):
-                print(f"[DEBUG] h_BChw for scale {si} are correct.")
-            else:
-                print(f"[DEBUG] h_BChw for scale {si} are incorrect.")
-                print(f"[DEBUG] sum of expected: {debug_data['h_BChw'][si].sum()}")
-                print(f"[DEBUG] sum of got: {predicted_dictionary['h_BChw'][si].cpu().numpy().sum()}")
-                print(f"[DEBUG] max difference: {max_difference(debug_data['h_BChw'][si], predicted_dictionary['h_BChw'][si].cpu().numpy())}")
-
-            for index in range(16):
-                if np.allclose(debug_data['block_output'][si][index].cpu().numpy(), predicted_dictionary['block_output'][si][index].cpu().numpy()):
-                    print(f"[DEBUG] x for scale {si} for block {index} are correct.")
-                else:
-                    print(f"[DEBUG] x for scale {si} for block {index} are incorrect.")
-                    print(f"[DEBUG]  sum of expected: {debug_data['block_output'][si][index].sum()}")
-                    print(f"[DEBUG]  sum of got: { predicted_dictionary['block_output'][si][index].sum()}")
-
-            if np.allclose(debug_data['f_hat'][si].cpu().numpy(), predicted_dictionary['f_hat'][si].cpu().numpy()):
-                print(f"[DEBUG] f_hat for scale {si} are correct.")
-            else:
-                print(f"[DEBUG] f_hat for scale {si} are incorrect.")
-                print(f"[DEBUG] sum of expected: {debug_data['f_hat'][si].sum()}")
-                print(f"[DEBUG] sum of got: {predicted_dictionary['f_hat'][si].cpu().numpy().sum()}")
-                print(f"[DEBUG] max difference: {max_difference(debug_data['f_hat'][si], predicted_dictionary['f_hat'][si].cpu().numpy())}")
-
-            if si < len(tc.model.patch_nums) - 1:
-                if np.allclose(debug_data['next_token_map'][si].cpu().numpy(), predicted_dictionary['next_token_map'][si].cpu().numpy()):
-                    print(f"[DEBUG] next_token_map for scale {si} are correct.")
-                else:
-                    print(f"[DEBUG] next_token_map for scale {si} are incorrect.")
-                    print(f"[DEBUG] sum of expected: {debug_data['next_token_map'][si].sum()}")
-                    print(f"[DEBUG] sum of got: {predicted_dictionary['next_token_map'][si].cpu().numpy().sum()}")
-                    print(f"[DEBUG] max difference: {max_difference(debug_data['next_token_map'][si], predicted_dictionary['next_token_map'][si].cpu().numpy())}")
-            
-            print()
-            print("-"*50)
-            print(f"[DEBUG] Scale {si} completed.")
-            print("-"*50)
-            print()
-
-    # Save the debug dictionary only if requested.
-    if compare_dicts:
-        os.makedirs(final_path_save, exist_ok=True)
-        with open(f"{final_path_save}/{type_of_model}_with_tau_{tau}.pkl", "wb") as f:
-            pickle.dump(predicted_dictionary, f)
-            print(f"[DEBUG] Saved the data to {final_path_save}/{type_of_model}_with_tau_{tau}.pkl")
-        with open(f"{final_path_save}/base_model.pkl", "wb") as f:
-            pickle.dump(debug_data, f)
-    
 
     return tc.model_vae.fhat_to_img(f_hat).add_(1).mul_(0.5), mean_flops, total_flops
 

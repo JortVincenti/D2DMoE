@@ -49,7 +49,7 @@ def main():
     qos = None
 
     # partition = 'plgrid-gpu-a100'
-    partition = 'gpu'
+    partition = 'gpu_a100'
     # partition = 'dgx'
     # partition = 'rtx3080'
     # partition = 'batch'
@@ -127,22 +127,22 @@ def main():
     # expert_split_args.model_args.expert_size = 32
     # expert_split_args.model_args.expert_size = 24
     # expert_split_args.model_args.expert_size = 12
-    expert_split_args.model_args.expert_size = 8 #6
+    expert_split_args.model_args.expert_size = 256 #6
     expert_split_args.model_args.experts_class = 'custom_kernel' #'execute_all'
     expert_split_args.activation = 'relu'
     final_path_save = [
-        'relu_moe_0',
-        'relu_moe_0.1',
-        'relu_moe_0.01',
-        'relu_moe_0.001',
-        'relu_moe_0.0001',
+        'relu_moe_0_e256',
+        'relu_moe_0.1_e256',
+        # 'relu_moe_0.01_e32',
+        # 'relu_moe_0.001_e32',
+        # 'relu_moe_0.0001_e32',
     ]
     path_file = [
         '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0/final.pth',
         '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.1/final.pth',
-        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.01/final.pth',
-        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.001/final.pth',
-        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.0001/final.pth',
+        # '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.01/final.pth',
+        # '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.001/final.pth',
+        # '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.0001/final.pth',
     ]
 
     # # ════════════════════════ dsti moe split ════════════════════════ #

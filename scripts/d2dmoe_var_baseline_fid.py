@@ -54,7 +54,7 @@ def main():
     # partition = 'rtx3080'
     # partition = 'batch'
 
-    timeout = 20 #60 * 24 * 7
+    timeout = 60 #60 * 24 * 7
     # timeout = 60 * 24 * 2
 
     gpus_per_task = 1
@@ -159,8 +159,8 @@ def main():
     dsti_routing_args.router_loss_type = 'mse' #'huber' #'mse'
     dsti_routing_args.epochs = 1
     # dsti_routing_args.epochs = 0.1
-    # dsti_routing_args.batch_size = 256
-    dsti_routing_args.batch_size = 128
+    dsti_routing_args.batch_size = 256
+    
     # dsti_routing_args.batch_size = 64
     dsti_routing_args.optimizer_args.lr = 0.001
     dsti_routing_args.model_args = {}
@@ -184,8 +184,8 @@ def main():
     #dsti_routing_args.mixed_precision = 'bf16'
     # Include Sparsity or not
     final_path_save = [
-        'relu_data_0',
-        #'relu_data_0.1',
+        #'relu_data_0',
+        'relu_data_0.1',
         #'relu_data_0.01',
         #'relu_data_0.001',
         #'relu_data_0.0001',
@@ -193,16 +193,18 @@ def main():
     ]
 
     path_file_ft = [
-        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0/final.pth',
-        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.1/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.1/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.01/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.001/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.0001/final.pth',
     ]
 
     path_file_moe = [
-        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.1/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0_e32/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.1_e256/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.01/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.001/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.0001/final.pth',
@@ -215,12 +217,22 @@ def main():
     for base_on_exp_name in base_split_exp_names:
         for exp_id in exp_ids:
             for i in range(len(final_path_save)):
-                dsti_routing_args.dsti_tau_to_eval =  [0.97] #[[1.0, 1.0, 1.0, 1.0, 1.0, 0.922, 0.921, 0.898, 0.883, 0.850], [1.0, 1.0, 1.0, 1.0, 1.0, 0.917, 0.882, 0.861, 0.799, 0.702]]
+                dsti_routing_args.dsti_tau_to_eval = [0.1, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+                #[
+                #    [1.0, 1.0, 1.0, 1.0, 1.0, 0.934, 0.923, 0.888, 0.886, 0.855],
+                    # [1.0, 1.0, 1.0, 1.0, 1.0, 0.972, 0.951, 0.938, 0.839, 0.794],
+                    # [1.0, 1.0, 1.0, 1.0, 1.0, 0.988, 0.976, 0.939, 0.898, 0.884],
+                    # [1.0, 1.0, 1.0, 1.0, 1.0, 0.966, 0.959, 0.873, 0.869, 0.711],
+                    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.939, 0.898, 0.884],
+                # ]
+                dsti_routing_args.batch_size_eff = 128
                 dsti_routing_args.dsti_tau_as_list = False
-                dsti_routing_args.use_router = True
+                dsti_routing_args.use_router = False
                 dsti_routing_args.fid = True
                 dsti_routing_args.debug = True
                 dsti_routing_args.final_path_save = final_path_save[i]
+                dsti_routing_args.expert_index_switch = 0
+                dsti_routing_args.model_experts_size = 256
 
                 if dsti_routing_args.final_path_save == 'base_data_moe':
                     dsti_routing_args.activation = None

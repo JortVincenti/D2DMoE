@@ -56,7 +56,7 @@ def main():
     # partition = 'rtx3080'
     # partition = 'batch'
 
-    timeout = 12*60 #60 * 24 * 7
+    timeout = 20 #60 * 24 * 7
     # timeout = 60 * 24 * 2
 
     gpus_per_task = 1
@@ -151,21 +151,21 @@ def main():
     dsti_routing_args.mixed_precision = None
     dsti_routing_args.fid = False
     dsti_routing_args.debug = False
-    dsti_routing_args.use_router = False
+    dsti_routing_args.use_router = True
     #dsti_routing_args.mixed_precision = 'bf16'
     # Include Sparsity or not
 
     final_path_save = [
-        'relu_data_0',
-       #'relu_data_0.1',
+        #'relu_data_0',
+        'relu_data_0.1',
         #'relu_data_0.01',
         #'relu_data_0.001',
         #'relu_data_0.0001',
     ]
 
     path_file_ft = [
-        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0/final.pth',
-        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.1/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.1/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.01/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.001/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.0001/final.pth',
@@ -173,8 +173,8 @@ def main():
     ]
 
     path_file_moe = [
-        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0/final.pth',
-        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.1/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.1/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.01/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.001/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.0001/final.pth',
@@ -205,11 +205,11 @@ def main():
             exp_name, run_name = generate_run_name(args)
             base_run_name = f'{args.base_on}_{exp_id}'
             executor.update_parameters(slurm_additional_parameters={})
-            job = submit_job(executor, best_tau_image, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
+            #job = submit_job(executor, best_tau_image, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
             job_2 = submit_job(executor, best_tau, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
-            jobs.append(job)
+            #jobs.append(job)
             jobs.append(job_2)
-            run_to_job_map[run_name] = job
+            run_to_job_map[run_name] = job_2
         exp_names.append(exp_name)
         base_routed_dsti_exp_names.append(exp_names[-1])
         display_names.append(f'DSTI')
