@@ -1,30 +1,14 @@
 import os
 from copy import deepcopy
 from pathlib import Path
-
 import submitit
-
 from common import get_default_args
-from methods.avit import train as train_avit
 from methods.dynamic_sparsification.expert_split import train as dsti_expert_split
 from methods.dynamic_sparsification.rep_distill_train import train as mha_distill
 from methods.dynamic_sparsification.sparse_finetuning import train as sparse_finetune
 from methods.dynamic_sparsification.train_routers import train as dsti_train_routers
-from methods.early_exit import train as train_ee
-from methods.moefication.expert_split import train as split_moe
-from methods.moefication.relufication import train as relufication
-from methods.moefication.train_routers import train as train_routers
 from train import train
 from utils import generate_run_name, submit_job
-#import utils
-from visualize.activation_sparsity import get_default_args as get_default_activation_sparsity_args
-from visualize.activation_sparsity import main as activation_sparsity_plot
-from visualize.cost_vs_plot import get_default_args as get_default_cost_plot_args
-from visualize.cost_vs_plot import main as cost_vs_plot
-from visualize.dsti_one_at_a_time import get_default_args as get_default_dsti_one_at_a_time_args
-from visualize.dsti_one_at_a_time import main as dsti_one_at_a_time_plot
-from visualize.moe_image_spatial_load import get_default_args as get_default_moe_image_spatial_load_args
-from visualize.moe_image_spatial_load import main as dsti_spatial_load_plot
 
 
 def load_env_variables(file_path):

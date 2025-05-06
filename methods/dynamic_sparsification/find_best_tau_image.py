@@ -9,7 +9,7 @@ from torch import nn
 from architectures.moe.moe_layers import ExecuteAllExperts, CustomKernelExperts
 from architectures.moe.moefication import add_routers, MoeficationMoE
 from common import get_default_args, INIT_NAME_MAP, LOSS_NAME_MAP
-from eval import benchmark_moe, online_evaluate_moe, score_moe, autoregressive_infer_cfg_with_expert_plot, autoregressive_infer_cfg_test
+from eval import benchmark_moe, online_evaluate_moe, score_moe, autoregressive_infer_cfg_with_expert_plot
 from train import TrainingContext, setup_accelerator, setup_data, setup_optimization, setup_files_and_logging, \
     setup_state, make_vae
 from utils import load_model, save_state, remove_hooks, save_final, Mixup, get_lrs, \

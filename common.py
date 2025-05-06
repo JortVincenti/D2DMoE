@@ -19,48 +19,13 @@ import sys
 import time
 from collections import OrderedDict
 from typing import Optional, Union
-
-from architectures.avit import AvitWrapper
-from architectures.early_exits.gpf import GPF
-from architectures.early_exits.l2w import L2W
-from architectures.early_exits.pbee import PBEE
-from architectures.early_exits.sdn import SDN
-from architectures.early_exits.ztw import ZTWCascading, ZTWEnsembling
-from architectures.efficientnet import EfficientNetV2
-from architectures.nlp import get_bert, get_distilbert, get_gpt2, get_roberta, get_gemma
-from architectures.pretrained import (
-    get_convnext_t,
-    get_efficientnet_b0,
-    get_efficientnet_v2_s,
-    get_swin_v2_s,
-    get_vit_b_16,
-    get_var_d16,
-)
-from architectures.resnets import ResNet18, ResNet34, ResNet50, ResNet101, ResNet152
-from architectures.vgg import VGG16BN
-from architectures.vit import VisionTransformer
-from architectures.var import VAR
+from architectures.pretrained import get_var_d16
 
 
 def default_init(model):
     for m in model.modules():
         if hasattr(m, 'reset_parameters'):
             m.reset_parameters()
-
-
-def vgg_init(model):
-    for m in model.modules():
-        if isinstance(m, nn.Conv2d):
-            n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-            m.weight.data.normal_(0, math.sqrt(2. / n))
-            if m.bias is not None:
-                m.bias.data.zero_()
-        elif isinstance(m, nn.BatchNorm2d):
-            m.weight.data.fill_(1)
-            m.bias.data.zero_()
-        elif isinstance(m, nn.Linear):
-            m.weight.data.normal_(0, 0.01)
-            m.bias.data.zero_()
 
 
 def get_default_args():
@@ -152,7 +117,6 @@ def get_default_args():
 
 INIT_NAME_MAP = {
     'default': default_init,
-    'vgg': vgg_init,
     None: None,
 }
 
@@ -206,30 +170,5 @@ SCHEDULER_NAME_MAP = {
 }
 
 MODEL_NAME_MAP = {
-    'vgg16bn': VGG16BN,
-    'resnet18': ResNet18,
-    'resnet34': ResNet34,
-    'resnet50': ResNet50,
-    'resnet101': ResNet101,
-    'resnet152': ResNet152,
-    'efficientnetv2': EfficientNetV2,
-    'vit': VisionTransformer,
-    'avit': AvitWrapper,
-    'sdn': SDN,
-    'pbee': PBEE,
-    'gpf': GPF,
-    'l2w': L2W,
-    'ztw_cascading': ZTWCascading,
-    'ztw_ensembling': ZTWEnsembling,
-    'tv_convnext_t': get_convnext_t,
-    'tv_efficientnet_b0': get_efficientnet_b0,
-    'tv_efficientnet_s': get_efficientnet_v2_s,
-    'tv_vit_b_16': get_vit_b_16,
-    'tv_swin_v2_s': get_swin_v2_s,
-    'bert': get_bert,
-    'distilbert': get_distilbert,
-    'roberta': get_roberta,
-    'gpt2': get_gpt2,
-    'gemma': get_gemma,
     'var_d16': get_var_d16,
 }

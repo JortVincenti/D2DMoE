@@ -9,7 +9,7 @@ from torch import nn
 from architectures.moe.moe_layers import ExecuteAllExperts, CustomKernelExperts
 from architectures.moe.moefication import add_routers, MoeficationMoE
 from common import get_default_args, INIT_NAME_MAP, LOSS_NAME_MAP
-from eval import benchmark_moe, online_evaluate_moe, score_moe, autoregressive_infer_cfg_with_expert_plot, autoregressive_infer_cfg_test
+from eval import benchmark_moe, online_evaluate_moe, score_moe, autoregressive_infer_cfg_with_expert_plot
 from train import TrainingContext, setup_accelerator, setup_data, setup_optimization, setup_files_and_logging, \
     setup_state, make_vae
 from utils import load_model, save_state, remove_hooks, save_final, Mixup, get_lrs, \
@@ -111,7 +111,7 @@ def setup_model(args, tc):
         tc.moe_modules = add_routers(model, args.model_args)
 
     if args.use_router:
-        final_router_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/' + args.final_path_save + "_router" + "/final.pth")
+        final_router_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/' + args.final_path_save + "_router_e" + str(args.model_experts_size)  + "/final.pth")
         final_state = torch.load(final_router_path, map_location=args.device)
         state_dict = final_state['model_state']
         model_arg = final_state['args'].model_args
@@ -139,7 +139,7 @@ def build_mini_dataset(folder_dataset, num_classes=256):
     return Subset(folder_dataset, selected_indices)
 
 
-def objective(param_dict, tc, mini_loader):
+def objective(trial, args, tc, mini_loader):
     """
     param_dict is a dictionary like: {
         "tau_0": <val>, "tau_1": <val>, ...
@@ -147,10 +147,17 @@ def objective(param_dict, tc, mini_loader):
     Returns a tuple: (final_loss, final_experts/1e7)
     """
     # 1) Gather the 5 tau_i from the dictionary
-    tau_list = [1.0]*5  # Suppose first 5 positions are fixed=1.0
-    for i in range(5):
-        tau_val = param_dict[f"tau_{i}"]
+    tau_list = [1.0] * 7
+    prev_tau = 1.0  # start at 1.0
+
+    for i in range(3):
+        # Set lower bound: first iteration uses 0.9; others use -1.0
+        lower_bound = prev_tau - 0.2
+        # Suggest a float in the range [lower_bound, prev_tau]
+        tau_val = trial.suggest_float(f"tau_{i}", lower_bound, prev_tau)
         tau_list.append(tau_val)
+        # Update prev_tau to the new value for the next iteration
+        prev_tau = tau_val
 
     # 2) Configure your model using these tau values
     for b in tc.model.blocks:
@@ -182,9 +189,12 @@ def objective(param_dict, tc, mini_loader):
     torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
     torch.set_float32_matmul_precision('high' if tf32 else 'highest')
     tc.model.rng.manual_seed(seed)
+    tc.initial_model.rng.manual_seed(seed)
 
     # 3) Loop over the mini_loader to get average loss & average experts
+    scale_sizes = [1, 4, 9, 16, 25, 36, 64, 100, 169, 256]    # must sum to 680
     tc.model.eval()
+    tc.initial_model.eval()
     for X, y in mini_loader:
         B, V = y.shape[0], tc.model_vae.vocab_size
         X = X.to(dist.get_device(), non_blocking=True)
@@ -194,14 +204,21 @@ def objective(param_dict, tc, mini_loader):
         gt_BL = torch.cat(gt_idx_Bl, dim=1)
         x_BLCv_wo_first_l = tc.model_vae.quantize.idxBl_to_var_input(gt_idx_Bl)
 
-        logits = tc.model(label_B, x_BLCv_wo_first_l)
+        logits = tc.model(label_B, x_BLCv_wo_first_l, old_FFN=tc.initial_model)
 
-        batch_task_loss = train_loss(
+        token_loss_B_L = train_loss(
             logits.view(-1, V),
             gt_BL.view(-1)
         ).view(B, -1)
 
-        batch_task_loss = batch_task_loss.mean()
+        # split along the sequence‑length dimension
+        splits = torch.split(token_loss_B_L, scale_sizes, dim=1)[7:]   # list of 10 tensors
+
+        # mean within each scale, keep the batch dimension
+        scale_means_B_10 = torch.stack([chunk.mean(dim=1) for chunk in splits], dim=1)
+
+        # equal‑weight average over the 10 scales, then over the batch
+        batch_task_loss = scale_means_B_10.mean(dim=1).mean()
 
         # measure "experts used" for this batch
         batch_experts = sum(moex.routing_mask.clone().sum() for moex in moe_modules)
@@ -213,7 +230,7 @@ def objective(param_dict, tc, mini_loader):
     final_experts = float(sum(all_experts) / len(all_experts))
 
     # 4) Return a tuple of objectives
-    return (final_loss, final_experts)
+    return (final_loss, final_experts/1e6)
     #return (final_loss, final_experts/1e7)
 
 
@@ -291,51 +308,32 @@ def compute_pareto_front(results):
     return pareto_solutions
 
 
-# -------------------------------------------------
-# Plot results in an interactive scatter
-# -------------------------------------------------
-def plot_all_results_interactive(results):
-    """
-    Creates an interactive Plotly scatter, showing each (loss, experts).
-    We'll embed textual info about the tau parameters in the hover.
-    """
-    # Convert results to arrays for plotting
-    xvals = []
-    yvals = []
-    hover_texts = []
 
-    for res in results:
-        (loss, experts) = res['values']
-        xvals.append(loss)
-        yvals.append(experts)
-        param_dict = res['params']
-        # Build a string like "tau_0=1.00, tau_1=0.95, ..."
-        tau_text = ", ".join(
-            f"{k}={param_dict[k]:.2f}"
-            for k in sorted(param_dict.keys())
-            if k.startswith("tau_")
-        )
-        hover_texts.append(tau_text)
-
-    fig = go.Figure(
-        data=go.Scatter(
-            x=xvals,
-            y=yvals,
-            mode='markers',
-            text=hover_texts,
-            hovertemplate="%{text}<extra></extra>"
-        )
+def plot_all_trials_interactive(args, study):
+    # Create an interactive Pareto front plot using Optuna's visualization API.
+    fig = vis.plot_pareto_front(study)
+    
+    # Build custom hover text for each trial (showing the τ parameters)
+    custom_texts = []
+    for trial in study.trials:
+        if trial.values is not None and trial.params:
+            # Create a string with τ parameters, e.g., "tau_0=0.875, tau_1=0.840, ..."
+            tau_text = ", ".join(
+                f"{key}={trial.params[key]:.3f}" for key in trial.params if key.startswith("tau")
+            )
+            custom_texts.append(tau_text)
+        else:
+            custom_texts.append("")
+    
+    # Update the figure traces with the custom hover text.
+    fig.update_traces(
+        text=custom_texts,
+        hovertemplate="%{text}<extra></extra>"
     )
-
-    fig.update_layout(
-        title="Pareto Scatter: (loss vs. experts)",
-        xaxis_title="Loss",
-        yaxis_title="Experts / 1e7"
-    )
-    fig.write_html("Images/pareto_CE.html")
-    print("Wrote interactive plot to Images/pareto_CE.html.")
-
-
+    
+    # Save the interactive plot as an HTML file.
+    fig.write_html("Images/optuna_pareto_CE_e" + str(args.model_experts_size) + ".html")
+    del fig
 # -------------------------------------------------
 # Main training loop with grid search
 # -------------------------------------------------
@@ -345,30 +343,37 @@ def training_loop(args, tc):
     Then collects results, plots them, and reports Pareto-optimal solutions.
     """
     # 1) Build a small "mini" dataset for quick evaluation
-    mini_dataset = build_mini_dataset(tc.train_loader.dataset, num_classes=16)
-    mini_loader = torch.utils.data.DataLoader(mini_dataset, batch_size=16, shuffle=False)
+    mini_dataset = build_mini_dataset(tc.train_loader.dataset, num_classes=32)
+    mini_loader = torch.utils.data.DataLoader(mini_dataset, batch_size=32, shuffle=False)
 
-    # 2) Generate only valid combos => no pruning needed
-    valid_grid = build_valid_tau_grid()
+    study = optuna.create_study(directions=["minimize", "minimize"], sampler=optuna.samplers.TPESampler())
 
-    # 3) Evaluate each param combination
-    results = []
-    for param_dict in valid_grid:
-        vals = objective(param_dict, tc, mini_loader)
-        print(f'Run done for {param_dict} with results {vals}')
-        results.append({
-            'params': param_dict,
-            'values': vals  # (loss, experts)
-        })
+
+    fixed_tau_configs = [
+        # any set(s) you consider important – here two examples
+        {"tau_0": 1.00, "tau_1": 1.00, "tau_2": 1.00},
+        {"tau_0": 0.80, "tau_1": 0.60, "tau_2": 0.40},
+    ]
+
+    for cfg in fixed_tau_configs:
+        # will be evaluated *exactly* as ordinary trials,
+        # but always before the sampler generates new ones
+        study.enqueue_trial(cfg)
+
+    study.optimize(lambda trial: objective(trial, args, tc, mini_loader), n_trials=30000)
 
     # 4) Produce the same style of interactive Pareto scatter
-    #plot_all_results_interactive(results)
+    plot_all_trials_interactive(args, study)
 
     # 5) Find and print the Pareto-optimal solutions
-    pareto_solutions = compute_pareto_front(results)
-    print("Number of Pareto-optimal solutions:", len(pareto_solutions))
-    for i, sol in enumerate(pareto_solutions):
-        print(f"Pareto solution {i}: values={sol['values']}, params={sol['params']}")
+    best_trials = study.best_trials
+    print("Number of Pareto-optimal solutions:", len(best_trials))
+
+    for i, t in enumerate(best_trials):
+        print(f"Pareto solution {i}: values={t.values}, params={t.params}")
+
+
+
 
 def train(args):
     logging.basicConfig(
@@ -409,3 +414,81 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+
+# def training_loop(args, tc):
+#     """
+#     Replaces the Optuna usage by manually iterating over a param grid.
+#     Then collects results, plots them, and reports Pareto-optimal solutions.
+#     """
+#     # 1) Build a small "mini" dataset for quick evaluation
+#     mini_dataset = build_mini_dataset(tc.train_loader.dataset, num_classes=16)
+#     mini_loader = torch.utils.data.DataLoader(mini_dataset, batch_size=16, shuffle=False)
+
+#     # 2) Generate only valid combos => no pruning needed
+#     #valid_grid = build_valid_tau_grid()
+
+#     # 3) Evaluate each param combination
+#     #results = []
+#     #for param_dict in valid_grid:
+#         vals = objective(param_dict, tc, mini_loader)
+#         #print(f'Run done for {param_dict} with results {vals}')
+#         #results.append({
+#         #    'params': param_dict,
+#         #    'values': vals  # (loss, experts)
+#         #})
+
+#     # 4) Produce the same style of interactive Pareto scatter
+#     #plot_all_results_interactive(results)
+
+#     # 5) Find and print the Pareto-optimal solutions
+#     pareto_solutions = compute_pareto_front(results)
+#     print("Number of Pareto-optimal solutions:", len(pareto_solutions))
+#     for i, sol in enumerate(pareto_solutions):
+#         print(f"Pareto solution {i}: values={sol['values']}, params={sol['params']}")
+
+
+# -------------------------------------------------
+# Plot results in an interactive scatter
+# -------------------------------------------------
+# def plot_all_results_interactive(results):
+#     """
+#     Creates an interactive Plotly scatter, showing each (loss, experts).
+#     We'll embed textual info about the tau parameters in the hover.
+#     """
+#     # Convert results to arrays for plotting
+#     xvals = []
+#     yvals = []
+#     hover_texts = []
+
+#     for res in results:
+#         (loss, experts) = res['values']
+#         xvals.append(loss)
+#         yvals.append(experts)
+#         param_dict = res['params']
+#         # Build a string like "tau_0=1.00, tau_1=0.95, ..."
+#         tau_text = ", ".join(
+#             f"{k}={param_dict[k]:.2f}"
+#             for k in sorted(param_dict.keys())
+#             if k.startswith("tau_")
+#         )
+#         hover_texts.append(tau_text)
+
+#     fig = go.Figure(
+#         data=go.Scatter(
+#             x=xvals,
+#             y=yvals,
+#             mode='markers',
+#             text=hover_texts,
+#             hovertemplate="%{text}<extra></extra>"
+#         )
+#     )
+
+#     fig.update_layout(
+#         title="Pareto Scatter: (loss vs. experts)",
+#         xaxis_title="Loss",
+#         yaxis_title="Experts / 1e7"
+#     )
+#     fig.write_html("Images/pareto_CE.html")
+#     print("Wrote interactive plot to Images/pareto_CE.html.")

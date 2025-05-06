@@ -7,12 +7,7 @@ from omegaconf import OmegaConf
 from torch import nn
 from torchvision.ops import MLP as TorchvisionMLP
 from transformers.activations import GELUActivation, PytorchGELUTanh
-from transformers.models.bert.modeling_bert import BertIntermediate
-from transformers.models.gemma.modeling_gemma import GemmaMLP
-
-from architectures.gpt import MLP as GPTMLP
-from architectures.moe.dsti import SimpleMLP, find_relu_activations
-from architectures.vit import MLP
+from architectures.moe.dsti import find_relu_activations
 from common import INIT_NAME_MAP, get_default_args
 from train import (
     TrainingContext,
@@ -66,8 +61,7 @@ def eligible_activation_filter(model: nn.Module, m: nn.Module):
     # print("parent", parent_module)
     # print(isinstance(m, (nn.ReLU, nn.GELU, GELUActivation, PytorchGELUTanh)), isinstance(parent_module, (MLP, TorchvisionMLP, SimpleMLP, GPTMLP, BertIntermediate, GemmaMLP, FFN)))
     # print("----"*100)
-    if isinstance(m, (nn.ReLU, nn.GELU, GELUActivation, PytorchGELUTanh)) and isinstance(parent_module, (
-            MLP, TorchvisionMLP, SimpleMLP, GPTMLP, BertIntermediate, GemmaMLP, FFN)):
+    if isinstance(m, (nn.ReLU, nn.GELU, GELUActivation, PytorchGELUTanh)) and isinstance(parent_module, (TorchvisionMLP, FFN)):
         return True
 
 
@@ -101,14 +95,14 @@ def setup_model(args, tc):
     logging.info(f'Modules selected for activation sparsification: {activations_to_sparsify}')
 
 
-    if args.path_file_ft:
-        init_path = Path(args.path_file_ft)
-        final_state = torch.load(init_path, map_location=args.device)
-        state_dict = final_state['model_state']
-        model_arg = final_state['args'].model_args
-        model = model.to(args.device)
-        new_state_dict = OrderedDict((k.replace("module.", ""), v) for k, v in state_dict.items())
-        model.load_state_dict(new_state_dict)
+    # if args.path_file_ft:
+    #     init_path = Path(args.path_file_ft)
+    #     final_state = torch.load(init_path, map_location=args.device)
+    #     state_dict = final_state['model_state']
+    #     model_arg = final_state['args'].model_args
+    #     model = model.to(args.device)
+    #     new_state_dict = OrderedDict((k.replace("module.", ""), v) for k, v in state_dict.items())
+    #     model.load_state_dict(new_state_dict)
 
     tc.modules_inputs, tc.modules_outputs, tc.model_hook_handles = \
         add_save_activations_hook(model, activations_to_sparsify)

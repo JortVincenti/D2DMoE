@@ -3,8 +3,6 @@ from typing import Dict
 import torch
 from torch import nn
 from transformers import apply_chunking_to_forward
-from transformers.models.bert import BertLayer
-from transformers.models.gemma.modeling_gemma import GemmaMLP
 
 from architectures.custom import CustomMultiheadAttention
 from architectures.moe.moe_layers import MoELayer
@@ -57,169 +55,35 @@ def moe_attention_forward(self: CustomMultiheadAttention, query: torch.Tensor, k
         return o, None, gating_data
 
 
-def moe_vit_block_forward(self, input: torch.Tensor):
-    torch._assert(input.dim() == 3, f"Expected (batch_size, seq_length, hidden_dim) got {input.shape}")
-    # torch.isnan is a synchronizing cuda operation - disable for benchmarking
-    # assert not torch.any(torch.isnan(input)), f'{input=}'
-    gating_data = {}
-    x = self.ln_1(input)
-    # some MHA layers can have MoEs instead of projection matrices
-    if isinstance(self.self_attention, CustomMultiheadAttention):
-        x, _, attn_gating_data = self.self_attention(query=x, key=x, value=x, need_weights=False)
-        gating_data.update(attn_gating_data)
+def moe_var_block_forward(self, x, cond_BD, attn_bias, current_scale):
+
+    if self.scale_switch is not None and current_scale < self.scale_switch:
+        if not self.dense_blocks and self.scale_switch: raise ValueError("scale_switch must be none when no dense_ffn is given, use set_dense_module() in VAR!")
+        router_stats = x.shape[0] * x.shape[1] * self.ffn.num_experts * self.ffn.expert_dim
+        x = self.dense_blocks(x, cond_BD, attn_bias)
+        if current_scale == self.scale_switch-1:
+            src_attn, dst_attn = self.dense_blocks.attn, self.attn
+            dst_attn.cached_k = src_attn.cached_k    # share the same tensor
+            dst_attn.cached_v = src_attn.cached_v
     else:
-        x, _ = self.self_attention(query=x, key=x, value=x, need_weights=False)
-    x = self.dropout(x)
-    x = x + input
-    y = self.ln_2(x)
-    # not all FFN layers have to be replaced with a MoE layer
-    if isinstance(self.mlp, MoELayer):
-        y, ffn_gating_data = self.mlp(y)
-        gating_data.update(ffn_gating_data)
-    else:
-        y = self.mlp(y)
-    return x + y, gating_data
+        if self.shared_aln:
+            gamma1, gamma2, scale1, scale2, shift1, shift2 = (self.ada_gss + cond_BD).unbind(2) # 116C + B16C =unbind(2)=> 6 B1C
+        else:
+            gamma1, gamma2, scale1, scale2, shift1, shift2 = self.ada_lin(cond_BD).view(-1, 1, 6, self.C).unbind(2)
 
-
-def moe_var_block_forward(self, x, cond_BD, attn_bias, old_FFN=None):
-    gating_data = {}
-    # print('-'*50)	
-    # print('x:', x.sum())
-    # print('cond_BD:', cond_BD.sum())
-
-    if self.shared_aln:
-        gamma1, gamma2, scale1, scale2, shift1, shift2 = (self.ada_gss + cond_BD).unbind(2) # 116C + B16C =unbind(2)=> 6 B1C
-    else:
-        gamma1, gamma2, scale1, scale2, shift1, shift2 = self.ada_lin(cond_BD).view(-1, 1, 6, self.C).unbind(2)
-
-    # print("gamma1:", gamma1.sum())
-    # print("gamma2:", gamma2.sum())
-    # print("scale1:", scale1.sum())
-    # print("scale2:", scale2.sum())
-    # print("shift1:", shift1.sum())
-    # print("shift2:", shift2.sum())
-    # mean = x.mean(dim=-1, keepdim=True)
-    # var = x.var(dim=-1, unbiased=False, keepdim=True)
-    # print("Mean:", mean)
-    # print("Variance:", var)
-
-    # # --- Attention path ---
-    # # 1) LN
-    # attn_input = self.ln_wo_grad(x)  # same shape as x
-    # print("ln_wo_grad(x):", attn_input[0, :5])          # or .flatten()[:5]
-    # # 2) scale in place
-    # attn_input.mul_(scale1.add(1))
-    # # 3) shift in place
-    # attn_input.add_(shift1)
-    # # 4) attn
+        x = x + self.drop_path(self.attn(self.ln_wo_grad(x).mul(scale1.add(1)).add_(shift1), attn_bias=attn_bias).mul_(gamma1))
     
-    # print("ln_wo_grad(x)*scale1+shift1 => attn input:", attn_input[0, :5])         # or .flatten()[:5]
+        if isinstance(self.ffn, MoELayer):
+            ffn_input = self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2)
+            y, router_stats = self.ffn(ffn_input) 
+            x = x + self.drop_path(y.mul(gamma2))
+        else:
+            x = x + self.drop_path(self.ffn(self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2)).mul(gamma2))
 
-    # attn_out = self.attn(attn_input, attn_bias=attn_bias)
-    # # 5) multiply by gamma1 in place
-    # print("attn_out (pre-gamma1):", attn_out[0, :5])
-    # attn_out.mul_(gamma1)
-    # print("attn_out (post-gamma1):", attn_out[0, :5])
-    # # 6) residual
-    # x = x + self.drop_path(attn_out)
-
-    # attn_input = self.ln_wo_grad(x)
-    # attn_input.mul_(scale1.add(1))
-    # attn_input.add_(shift1)
-    # print("attn_input:", attn_input.sum())
-    x = x + self.drop_path(self.attn(self.ln_wo_grad(x).mul(scale1.add(1)).add_(shift1), attn_bias=attn_bias).mul_(gamma1))
-    # if print_first:
-    #     print("x (post-attn):", x.sum())
+    return x, router_stats
 
 
-    #ffn = FFN(in_features=1024, hidden_features=round(1024 * 4), drop=0, fused_if_available=True).to(x.device)
-    if isinstance(self.ffn, MoELayer):
-        # y = ffn(self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2))
-        # ffn_gating_data = {"gate1": 1.0, "gate2": 0.3, "gate3": 3.2}
-        # if print_first:
-        #     y, ffn_gating_data = self.ffn(self.ln_wo_grad(x).mul(scale2.add(1)).clone().add(shift2))
-        #     print('input into ffn', y.sum())
-        # else:
-        # Pre-compute the ffn input:
-        ffn_input = self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2)
-        with record_function("FFN_Call"):
-            if old_FFN:
-                # torch.cuda.synchronize()
-                # start_time = time.time()
-                y = old_FFN(ffn_input)
-                ffn_gating_data = {}
-                # torch.cuda.synchronize()
-                # elapsed = time.time() - start_time
-                # print(f"Time for old-FFN call: {elapsed * 1000.0:.3f} ms")
-            else:
-                y, ffn_gating_data = self.ffn(ffn_input)
-
-        # Continue with the rest of the operations:
-        x = x + self.drop_path(y.mul(gamma2))
-        gating_data.update(ffn_gating_data)
-    else:
-        x = x + self.drop_path(self.ffn(self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2)).mul(gamma2))
-
-    return x, gating_data
-
-
-def moe_gpt_block_forward(self, input: torch.Tensor):
-    torch._assert(input.dim() == 3, f"Expected (batch_size, seq_length, hidden_dim) got {input.shape}")
-    assert not torch.any(torch.isnan(input)), f'{input=}'
-    gating_data = {}
-    ln1 = self.ln_1(input)
-    if isinstance(self.attn, CustomMultiheadAttention):
-        attn_output, _, attn_gating_data = self.attn(query=ln1, key=ln1, value=ln1, need_weights=False)
-        # TODO how to preserve dropout there?
-        gating_data.update(attn_gating_data)
-    else:
-        attn_output = self.attn(ln1)
-    h = input + attn_output
-    ln2 = self.ln_2(h)
-    # not all FFN layers have to be replaced with a MoE layer
-    if isinstance(self.mlp, MoELayer):
-        mlp_out, ffn_gating_data = self.mlp(ln2)
-        # TODO is there a better way to do dropout here?
-        mlp_out = self.mlp.dropout(mlp_out)
-        gating_data.update(ffn_gating_data)
-    else:
-        mlp_out = self.mlp(ln2)
-    return h + mlp_out, gating_data
-
-
-def moe_vit_encoder_forward(self, input: torch.Tensor):
-    torch._assert(input.dim() == 3, f"Expected (batch_size, seq_length, hidden_dim) got {input.shape}")
-    encoder_block_x = self.dropout(input + self.pos_embedding)
-    gating_data = {}
-    for layer in self.layers:
-        encoder_block_x, encoder_block_gating_data = layer(encoder_block_x)
-        gating_data.update(encoder_block_gating_data)
-    return self.ln(encoder_block_x), gating_data
-
-
-def moe_vit_main_forward(self, x: torch.Tensor, return_gating_data: bool = False):
-    # Reshape and permute the input tensor
-    x = self._process_input(x)
-    n = x.shape[0]
-    # Expand the class token to the full batch
-    batch_class_token = self.class_token.expand(n, -1, -1)
-    x = torch.cat([batch_class_token, x], dim=1)
-    x, gating_data = self.encoder(x)
-    # Classifier "token" as used by standard language architectures
-    x = x[:, 0]
-    x = self.heads(x)
-    if return_gating_data is True:
-        return x, gating_data
-    else:
-        return x
-
-
-def moe_var_main_forward(
-    self,
-    class_idx: torch.Tensor,
-    x: torch.Tensor,
-    return_gating_data: bool = False
-) -> torch.Tensor:
+def moe_var_main_forward(self, class_idx: torch.Tensor, x: torch.Tensor, return_gating_data: bool = False) -> torch.Tensor:
     """
     A reference forward pass that mirrors the original VAR logic,
     but uses the requested signature.
@@ -242,6 +106,7 @@ def moe_var_main_forward(
         torch.Tensor: Final logits with shape [B, L, vocab_size], 
                       or ([B, L, vocab_size], gating_data) if return_gating_data=True.
     """
+    raise NotImplementedError('Only used for training')
     # -------------------------------------------------------------------------
     # 1) Move inputs onto the correct device(s)
     # -------------------------------------------------------------------------
@@ -329,7 +194,7 @@ def moe_var_main_forward(
     # 7) Pass through your MoE/Transformer blocks, optionally capturing gating
     # -------------------------------------------------------------------------
     gating_info = []
-    for block in self.blocks:  
+    for index, block in enumerate(self.blocks):  
         # If your block returns (output, gating_data):
         x_BLC, g_dat = block(x_BLC, cond_BD_or_gss, attn_bias)
         gating_info.append(g_dat)
@@ -361,167 +226,6 @@ def moe_var_main_forward(
         return x_BLC, gating_info
     else:
         return x_BLC
-
-
-
-
-def moe_gemma_decoder_forward(self, hidden_states: torch.Tensor, attention_mask: torch.Tensor,
-                              position_ids: torch.Tensor, cache_position: torch.Tensor, ):
-    gating_data = {}
-
-    residual = hidden_states
-    hidden_states = self.input_layernorm(hidden_states)
-
-    # Self Attention
-    hidden_states, self_attn_weights, present_key_value = self.self_attn(
-        hidden_states=hidden_states,
-        attention_mask=attention_mask,
-        position_ids=position_ids,
-        cache_position=cache_position,
-    )
-    hidden_states = residual + hidden_states
-
-    # Fully Connected
-    residual = hidden_states
-    hidden_states = self.post_attention_layernorm(hidden_states)
-
-    if isinstance(self.mlp, MoELayer):
-        hidden_states, ffn_gating_data = self.mlp(hidden_states)
-        gating_data.update(ffn_gating_data)
-    else:
-        hidden_states = self.mlp(hidden_states)
-
-    hidden_states = residual + hidden_states
-
-    return hidden_states, gating_data
-
-
-def moe_gemma_main_forward(self, input_ids: torch.Tensor, attention_mask, return_gating_data: bool = False):
-    inputs_embeds = self.model.embed_tokens(input_ids)
-    past_seen_tokens = 0
-    cache_position = torch.arange(
-        past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-    )
-    position_ids = cache_position.unsqueeze(0)
-    causal_mask = self.model._update_causal_mask(attention_mask, inputs_embeds, cache_position, None, False)
-    hidden_states = inputs_embeds
-    # normalized
-    # Gemma downcasts the below to float16, causing sqrt(3072)=55.4256 to become 55.5
-    # See https://github.com/huggingface/transformers/pull/29402
-    normalizer = torch.tensor(self.config.hidden_size ** 0.5, dtype=hidden_states.dtype)
-    hidden_states = hidden_states * normalizer
-    gating_data = {}
-    for decoder_layer in self.model.layers:
-        layer_outputs, transformer_block_gating_data = decoder_layer(
-            hidden_states=hidden_states,
-            attention_mask=causal_mask,
-            position_ids=position_ids,
-            cache_position=cache_position,
-        )
-        gating_data.update(transformer_block_gating_data)
-        hidden_states = layer_outputs
-    hidden_states = self.model.norm(hidden_states)
-    logits = self.lm_head(hidden_states)
-    logits = logits.float()
-    if return_gating_data is True:
-        return logits, gating_data
-    else:
-        return logits
-
-
-def moe_gpt_main_forward(self, x: torch.Tensor, return_gating_data: bool = False):
-    # Reshape and permute the input tensor
-    device = x.device
-    b, t = x.size()
-    assert (
-            t <= self.config.block_size
-    ), f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-    pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
-
-    tok_emb = self.transformer.wte(x)  # token embeddings of shape (b, t, n_embd)
-    pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
-
-    x = self.transformer.drop(tok_emb + pos_emb)
-    gating_data = {}
-    for block in self.transformer.h:
-        x, transformer_block_gating_data = block(x)
-        gating_data.update(transformer_block_gating_data)
-
-    x = self.transformer.ln_f(x)
-    x = self.lm_head(x)
-
-    if return_gating_data is True:
-        return x, gating_data
-    else:
-        return x
-
-
-def moe_bert_layer_forward(self, x: torch.Tensor, attn_mask: torch.Tensor, return_gating_data: bool = False):
-    if isinstance(self.attention, CustomMultiheadAttention):
-        raise NotImplementedError()
-    else:
-        attn_output = self.attention(
-            x,
-            attn_mask,
-        )[0]
-
-    gating_data = {}
-    if hasattr(self, 'mlp'):
-        ffn_out, ffn_gating_data = self.mlp(attn_output)
-        gating_data.update(ffn_gating_data)
-        ffn_out = self.dropout(ffn_out)
-        y = self.ln(ffn_out + attn_output)
-    else:
-        y = apply_chunking_to_forward(
-            self.feed_forward_chunk,
-            self.chunk_size_feed_forward,
-            self.seq_len_dim,
-            attn_output,
-        )
-
-    return y, gating_data
-
-
-def moe_bert_main_forward(self, x: Dict[str, torch.Tensor], return_gating_data: bool = False):
-    input_ids = x["input_ids"]
-    attention_mask = x["attention_mask"]
-    token_type_ids = x["token_type_ids"]
-
-    # BEGIN ENCODER
-    # should be equivalent to: x = self.encoder(x)
-    extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(
-        attention_mask, input_shape=input_ids.size()
-    )
-    x = self.bert.embeddings(
-        input_ids=input_ids,
-        token_type_ids=token_type_ids,
-    )
-
-    # Iterate through the transformer blocks
-    gating_data = {}
-    for bert_block in self.bert.encoder.layer:
-        x, block_gating_data = bert_block(x, extended_attention_mask)
-        gating_data.update(block_gating_data)
-
-    # Return classifier token
-    pooled_output = self.bert.pooler(x) if self.bert.pooler is not None else x
-    pooled_output = self.dropout(pooled_output)
-    x = self.classifier(pooled_output)
-
-    if return_gating_data is True:
-        return x, gating_data
-    else:
-        return x
-
-
-def ffn_filter_condition_bert(_model: nn.Module, m: nn.Module):
-    if isinstance(m, BertLayer):
-        return True
-
-
-def ffn_filter_condition_gemma(_model: nn.Module, m: nn.Module):
-    if isinstance(m, GemmaMLP):
-        return True
 
 
 def ffn_filter_condition_var(_model: nn.Module, m: nn.Module):

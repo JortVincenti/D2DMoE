@@ -3,11 +3,13 @@ from copy import deepcopy
 from pathlib import Path
 
 import submitit
+
 from common import get_default_args
 from methods.dynamic_sparsification.expert_split import train as dsti_expert_split
 from methods.dynamic_sparsification.rep_distill_train import train as mha_distill
 from methods.dynamic_sparsification.sparse_finetuning import train as sparse_finetune
 from methods.dynamic_sparsification.train_routers import train as dsti_train_routers
+from methods.dynamic_sparsification.time_experts import train as dsti_time_experts
 from train import train
 from utils import generate_run_name, submit_job
 
@@ -34,12 +36,12 @@ def main():
     qos = None
 
     # partition = 'plgrid-gpu-a100'
-    partition = 'gpu_h100'
+    partition = 'gpu_a100'
     # partition = 'dgx'
     # partition = 'rtx3080'
     # partition = 'batch'
 
-    timeout = 60 #60 * 24 * 7
+    timeout = 25 #60 * 24 * 7
     # timeout = 60 * 24 * 2
 
     gpus_per_task = 1
@@ -114,8 +116,8 @@ def main():
     # expert_split_args.model_args.expert_size = 12
     expert_split_args.model_args.expert_size = 8 #6
     expert_split_args.model_args.experts_class = 'execute_all'
-    expert_split_args.activation = 'gelu'
-    expert_split_args.final_path_save = 'gelu_moe'
+    expert_split_args.activation = None
+    expert_split_args.final_path_save = 'base_moe'
 
     # # ════════════════════════ dsti moe split ════════════════════════ #
     base_split_exp_names = []
@@ -125,10 +127,10 @@ def main():
         exp_name, run_name = generate_run_name(args)
         args.base_on = exp_name
         base_run_name = f'{exp_id}'
-        executor.update_parameters(slurm_additional_parameters={})
-        job = submit_job(executor, dsti_expert_split, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
-        jobs.append(job)
-        run_to_job_map[run_name] = job
+        # executor.update_parameters(slurm_additional_parameters={})
+        # job = submit_job(executor, dsti_expert_split, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
+        # jobs.append(job)
+        # run_to_job_map[run_name] = job
 
     exp_names.append(exp_name)
     base_split_exp_names.append(exp_names[-1])
@@ -144,8 +146,8 @@ def main():
     dsti_routing_args.router_loss_type = 'mse' #'huber' #'mse'
     dsti_routing_args.epochs = 1
     # dsti_routing_args.epochs = 0.1
-    # dsti_routing_args.batch_size = 256
-    dsti_routing_args.batch_size = 128
+    dsti_routing_args.batch_size = 256
+    
     # dsti_routing_args.batch_size = 64
     dsti_routing_args.optimizer_args.lr = 0.001
     dsti_routing_args.model_args = {}
@@ -154,43 +156,81 @@ def main():
     # dsti_routing_args.model_args.width = 32
     # dsti_routing_args.model_args.width = 16
     # dsti_routing_args.model_args.activation = 'gelu'
-    dsti_routing_args.model_args.activation = 'relu'
+    dsti_routing_args.model_args.activation = 'gelu'
     # dsti_routing_args.model_args.activation = 'tanh'
     dsti_routing_args.model_args.output_activation = 'abs'
     # dsti_routing_args.model_args.output_activation = 'relu'
     # dsti_routing_args.model_args.output_activation = 'identity'
     dsti_routing_args.dsti_router_labels_layer = 'output'
     dsti_routing_args.dsti_router_labels_norm = 2
-    dsti_routing_args.dsti_tau_to_eval =  [0.9, 0.925, 0.93, 0.935, 0.94, 0.945,0.95, 0.96, 0.97, 0.98, 0.99, 0.995, 0.999, 0.9999, 1.0]
-    #[0.5, 0.8, 1.0]
-    # [0.9, 0.925, 0.93, 0.935, 0.94, 0.945,0.95,
-    #                                       0.96, 0.97, 0.98, 0.99, 0.995, 0.999, 0.9999, 1.0]
-                                           
-    # [0.5, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.925, 0.95,
-    #                                       0.96, 0.97, 0.98, 0.99, 0.995, 0.999, 0.9999, 1.0]
     
-    dsti_routing_args.dsti_expert_selection_mode = 'dynk_max'
+    #dsti_routing_args.dsti_expert_selection_mode = 'dynk_max'
     dsti_routing_args.eval_points = 4
     # dsti_routing_args.eval_points = 0
     dsti_routing_args.mixed_precision = None
     #dsti_routing_args.mixed_precision = 'bf16'
-    dsti_routing_args.include_sparsity = True
-    dsti_routing_args.activation = 'gelu'
+    # Include Sparsity or not
+    final_path_save = [
+        #'relu_data_0',
+        'relu_data_0.1',
+        #'relu_data_0.01',
+        #'relu_data_0.001',
+        #'relu_data_0.0001',
+        #'base_data_moe',
+    ]
+
+    path_file_ft = [
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.1/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.01/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.001/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_sparse_ft_0.0001/final.pth',
+    ]
+
+    path_file_moe = [
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.1/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0_e32/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.1_e256/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.01/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.001/final.pth',
+        #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.0001/final.pth',
+    ]
+
 
     # # ════════════════════════ dsti router training ════════════════════════ #
     # Jort HEre
     base_routed_dsti_exp_names = []
     for base_on_exp_name in base_split_exp_names:
         for exp_id in exp_ids:
-            args = deepcopy(dsti_routing_args)
-            args.exp_id = exp_id
-            args.base_on = base_on_exp_name
-            exp_name, run_name = generate_run_name(args)
-            base_run_name = f'{base_on_exp_name}_{exp_id}'
-            executor.update_parameters(slurm_additional_parameters={})
-            job = submit_job(executor, dsti_train_routers, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
-            jobs.append(job)
-            run_to_job_map[run_name] = job
+            for i in range(len(final_path_save)):
+                dsti_routing_args.dsti_tau_to_eval = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05]
+
+                dsti_routing_args.batch_size_eff = 128
+
+                dsti_routing_args.final_path_save = final_path_save[i]
+                dsti_routing_args.expert_index_switch = 0
+                dsti_routing_args.model_experts_size = 256
+
+
+                if 'relu' in dsti_routing_args.final_path_save:
+                    dsti_routing_args.activation = 'relu'
+                    dsti_routing_args.path_file_ft = path_file_ft[i]
+                    dsti_routing_args.path_file_moe = path_file_moe[i]
+                else:
+                    dsti_routing_args.activation = 'gelu'
+                    dsti_routing_args.path_file_ft = path_file_ft[i]
+                    dsti_routing_args.path_file_moe = path_file_moe[i]
+
+                args = deepcopy(dsti_routing_args)
+                args.exp_id = exp_id
+                args.base_on = base_on_exp_name
+                exp_name, run_name = generate_run_name(args)
+                base_run_name = f'{base_on_exp_name}_{exp_id}'
+                executor.update_parameters(slurm_additional_parameters={})
+                job = submit_job(executor, dsti_time_experts, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
+                jobs.append(job)
+                run_to_job_map[run_name] = job
         exp_names.append(exp_name)
         base_routed_dsti_exp_names.append(exp_names[-1])
         display_names.append(f'DSTI')
@@ -207,79 +247,6 @@ def main():
 
     out_dir_name = f"vit_{common_args.dataset}_wip_hoyer"
     output_dir = Path(os.environ["RESULTS_DIR"]) / out_dir_name
-    # plot_args.output_dir = output_dir
-    # plot_args.runs_dir = common_args.runs_dir
-    # plot_args.exp_names = exp_names
-    # plot_args.exp_ids = exp_ids
-    # plot_args.display_names = display_names
-    # plot_args.output_name = "cost_vs"
-    # plot_args.mode = "acc"
-    # plot_args.use_wandb = False
-
-    # if jobs:
-    #     dependency_str = f'afterany:{":".join(job.job_id for job in jobs)}'  # wait for all jobs to finish before plotting
-    #     executor.update_parameters(slurm_additional_parameters={"dependency": dependency_str})
-    # submit_job(executor, cost_vs_plot, plot_args, num_gpus=1, gpu_type=gpu_type)
-
-    # # ════════════════════════ sparsity analysis ════════════════════════ #
-
-    # plot_args = get_default_activation_sparsity_args()
-    # plot_args.output_dir = output_dir
-    # plot_args.runs_dir = common_args.runs_dir
-    # plot_args.exp_names = exp_names[5:6]
-    # plot_args.exp_ids = exp_ids
-    # plot_args.display_names = display_names[5:6]
-    # plot_args.use_wandb = False
-    # # plot_args.mixed_precision = None
-    # plot_args.mixed_precision = 'bf16'
-    # if jobs:
-    #     dependency_str = f'afterany:{":".join(job.job_id for job in jobs)}'  # wait for all jobs to finish before plotting
-    #     executor.update_parameters(slurm_additional_parameters={"dependency": dependency_str})
-    # else:
-    #     executor.update_parameters(slurm_additional_parameters={})
-    # submit_job(executor, activation_sparsity_plot, plot_args, num_gpus=2, gpu_type=gpu_type)
-
-    # ════════════════════════ dsti analysis ════════════════════════ #
-
-    # plot_args = get_default_dsti_one_at_a_time_args()
-    # plot_args.output_dir = output_dir
-    # plot_args.runs_dir = common_args.runs_dir
-    # plot_args.exp_names = exp_names
-    # plot_args.exp_ids = exp_ids
-    # plot_args.display_names = display_names
-    # plot_args.use_wandb = False
-    # # plot_args.mixed_precision = None
-    # plot_args.mixed_precision = 'bf16'
-    # if jobs:
-    #     dependency_str = f'afterany:{":".join(job.job_id for job in jobs)}'  # wait for all jobs to finish before plotting
-    #     executor.update_parameters(slurm_additional_parameters={"dependency": dependency_str})
-    # else:
-    #     executor.update_parameters(slurm_additional_parameters={})
-    # submit_job(executor, dsti_one_at_a_time_plot, plot_args, num_gpus=2, gpu_type=gpu_type)
-
-    # ════════════════════════ dsti analysis ════════════════════════ #
-    # Jort HEre
-    # plot_args = deepcopy(common_args)
-    # plot_args = get_default_moe_image_spatial_load_args()
-    # plot_args.output_dir = output_dir / 'spatial_load'
-    # plot_args.runs_dir = common_args.runs_dir
-    # plot_args.exp_names = exp_names
-    # plot_args.exp_ids = exp_ids
-    # plot_args.display_names = display_names
-    # valid_set_len = 1000
-    # images_to_draw = 1
-    # plot_args.data_indices = [round(i / images_to_draw * (valid_set_len - 1)) for i in range(images_to_draw)]
-    # plot_args.num_cheapest = 1
-    # plot_args.num_costliest = 0
-    # plot_args.batch_size = 16 #32
-    # plot_args.dsti_tau = 0.9975
-    # plot_args.use_wandb = False
-    # if jobs:
-    #     dependency_str = f'afterany:{":".join(job.job_id for job in jobs)}'  # wait for all jobs to finish before plotting
-    #     executor.update_parameters(slurm_additional_parameters={"dependency": dependency_str})
-    # else:
-    #     executor.update_parameters(slurm_additional_parameters={})
-    # submit_job(executor, dsti_spatial_load_plot, plot_args, num_gpus=1, gpu_type=gpu_type)
 
 
 if __name__ == '__main__':

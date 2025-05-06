@@ -2,25 +2,13 @@ import logging
 from copy import deepcopy
 from functools import partial
 from typing import List
-
 import torch
 from k_means_constrained import KMeansConstrained
 from torch import nn
-from torchvision.models import VisionTransformer
-from transformers import BertPreTrainedModel, BertForSequenceClassification
-from transformers.models.bert import BertLayer
-from transformers.models.gemma.modeling_gemma import GemmaMLP
-
 from architectures.custom import CustomMultiheadAttention
 from architectures.moe.dsti import ResidualMLP
-from architectures.moe.moe_layers import MoELayer, MOE_IMPL_MAP, ModuleBatchedExperts, ExecuteAllExperts, \
-    CustomKernelExperts
-from architectures.moe.moe_models import moe_vit_block_forward, moe_vit_encoder_forward, moe_vit_main_forward, \
-    moe_attention_forward, moe_gpt_block_forward, moe_gpt_main_forward, moe_bert_layer_forward, moe_bert_main_forward, \
-    moe_gemma_main_forward, moe_gemma_decoder_forward, moe_var_block_forward, moe_var_main_forward
-from architectures.nlp import GemmaWrapper
-from architectures.vit import VisionTransformer as CustomVisionTransformer
-from architectures.gpt import GPT, MLP as GPTMLP
+from architectures.moe.moe_layers import MoELayer, MOE_IMPL_MAP, ExecuteAllExperts, CustomKernelExperts
+from architectures.moe.moe_models import moe_var_block_forward, moe_var_main_forward
 from common import ACTIVATION_NAME_MAP
 from utils import find_module_names, get_module_by_name, set_module_by_name
 from architectures.pretrained import NullDDP
@@ -30,6 +18,7 @@ import numpy as np
 from torch.profiler import record_function
 import torch.nn.functional as F
 import time
+import warnings
 
 class MoeficationMoE(MoELayer):
     # https://arxiv.org/pdf/2110.01786.pdf
@@ -56,7 +45,6 @@ class MoeficationMoE(MoELayer):
         self.k = None
         self.tau = None
         self.add_residual_connection = add_residual_connection
-        self.routing_mask = None
 
         # Compute and store centroids in self.centroids
         all_centroids = []
@@ -104,23 +92,32 @@ class MoeficationMoE(MoELayer):
             predicted_expert_norms = self.router(x)
             max_norms, _ = predicted_expert_norms.max(dim=-1, keepdim=True) #This is for the other 0.
             if isinstance(self.tau, list):
-                # Define the group sizes that sum to 680:
-                group_sizes = [1, 4, 9, 16, 25, 36, 64, 100, 169, 256]
-                # Build a 1D tensor (length=680) of threshold factors.
-                # For each group, the factor is (1.0 - tau[i]).
-                factors = []
-                for tau_val, group_size in zip(self.tau, group_sizes):
-                    # Create a tensor filled with (1.0 - tau_val) for this group.
-                    group_factor = torch.full((group_size,),
-                                                1.0 - tau_val,
-                                                device=max_norms.device,
-                                                dtype=max_norms.dtype)
-                    factors.append(group_factor)
-                # Concatenate all factors to obtain a tensor of shape [680]
-                factors = torch.cat(factors, dim=0)
-                # Reshape factors to [1, 1, 680] so they broadcast over the batch dimension
-                factors = factors.view(1, -1, 1)
-                # Compute the norm thresholds using the per-position factors.
+                # Original scale layout, smallest → largest.
+                seq_len = x.size(1)                           # e.g. 525 after your split
+                full_scale_sizes = [1, 4, 9, 16, 25, 36, 64, 100, 169, 256]
+                assert len(self.tau) == len(full_scale_sizes), "tau list must have 10 entries"
+
+                device, dtype = max_norms.device, max_norms.dtype
+
+                # --- build factors starting from the *last* scale and moving left ----------
+                factors_tail = []
+                remain       = seq_len
+
+                for tau_val, gsize in zip(reversed(self.tau), reversed(full_scale_sizes)):
+                    if remain == 0:
+                        break                        # collected enough tokens
+                    take = min(gsize, remain)        # gsize is bigger than remain only
+                                                    # when seq_len cuts a scale in half
+                    factors_tail.append(
+                        torch.full((take,), 1.0 - tau_val, device=device, dtype=dtype)
+                    )
+                    remain -= take
+
+                # factors_tail is built in reverse order – put it back in forward order
+                factors_1d = torch.cat(list(reversed(factors_tail)), dim=0)   # length == L
+                assert factors_1d.numel() == seq_len, "factor length mismatch!"
+
+                factors = factors_1d.view(1, seq_len, 1) 
                 norm_thresholds = max_norms * factors
             else:
                 norm_thresholds = max_norms * (1.0 - self.tau)
@@ -148,24 +145,34 @@ class MoeficationMoE(MoELayer):
             max_norms, _ = norms.max(dim=0, keepdim=True)
             # norm_thresholds => shape (1,B,T)
             if isinstance(self.tau, list):
-                # Define the group sizes that sum to 680:
-                # 1, 4, 9, 16, 25, 36, 64, 100, 169, 256
-                group_sizes = [1, 4, 9, 16, 25, 36, 64, 100, 169, 256]
-                # Build a 1D tensor (length=680) of threshold factors.
-                # For each group, the factor is (1.0 - tau[i]).
-                factors = []
-                for tau_val, group_size in zip(self.tau, group_sizes):
-                    # Create a tensor filled with (1.0 - tau_val) for this group.
-                    group_factor = torch.full((group_size,),
-                                                1.0 - tau_val,
-                                                device=max_norms.device,
-                                                dtype=max_norms.dtype)
-                    factors.append(group_factor)
-                # Concatenate all factors to obtain a tensor of shape [680]
-                factors = torch.cat(factors, dim=0)
-                # Reshape factors to [1, 1, 680] so they broadcast over the batch dimension
-                factors = factors.view(1, 1, -1)
-                # Compute the norm thresholds using the per-position factors.
+                # Original scale layout, smallest → largest.
+                seq_len = x.size(1)                           # e.g. 525 after your split
+                full_scale_sizes = [1, 4, 9, 16, 25, 36, 64, 100, 169, 256]
+                assert len(self.tau) == len(full_scale_sizes), "tau list must have 10 entries"
+
+                device, dtype = max_norms.device, max_norms.dtype
+
+                # --- build factors starting from the *last* scale and moving left ----------
+                factors_tail = []
+                remain       = seq_len
+
+                for tau_val, gsize in zip(reversed(self.tau), reversed(full_scale_sizes)):
+                    if remain == 0:
+                        break                        # collected enough tokens
+                    take = min(gsize, remain)        # gsize is bigger than remain only
+                                                    # when seq_len cuts a scale in half
+                    factors_tail.append(
+                        torch.full((take,), 1.0 - tau_val, device=device, dtype=dtype)
+                    )
+                    remain -= take
+
+                # factors_tail is built in reverse order – put it back in forward order
+                factors_1d = torch.cat(list(reversed(factors_tail)), dim=0)   # length == L
+                assert factors_1d.numel() == seq_len, "factor length mismatch!"
+
+                factors = factors_1d.view(1, 1, seq_len)      # [1, 1, L] for broadcasting
+                print(factors.shape)
+                print(max_norms.shape)
                 norm_thresholds = max_norms * factors
             else:
                 norm_thresholds = max_norms * (1.0 - self.tau)
@@ -176,9 +183,6 @@ class MoeficationMoE(MoELayer):
 
             # Permute => (B,T,E)
             routing_tensor = new_routing.permute(1, 2, 0)
-
-            # For inspection (optionally):
-            self.routing_mask = routing_tensor.sum(dim=-1)
         elif self.forward_mode == 'centroids':
             """
             For each token in x:
@@ -196,12 +200,10 @@ class MoeficationMoE(MoELayer):
             centroids_norm = self.centroids / (self.centroids.norm(dim=-1, keepdim=True) + 1e-9)  # (num_experts, D)
             # 2) Compute similarity => (B, T, num_experts)
             similarity = torch.einsum('btd,ed->bte', x_norm, centroids_norm)
-            similarity = F.relu(similarity)  # all negative scores become 0
 
-            # print("[DEBUG] similarity shape:", similarity.shape)
-            # Print stats for a sample token (say, token[0,0])
-            sample_sim = similarity[0, 0, :]
-            #print("[DEBUG] Token[0,0] similarity (first 10 values):", sample_sim[:10].detach().cpu().numpy())
+            # 2) shift so that the minimum per-token is zero
+            sim_min = similarity.min(dim=-1, keepdim=True)[0]      # (B, T, 1)
+            similarity = similarity - sim_min                   # now ∨ similarity_pos >= 0
 
             # 3) top-k retrieval in descending order (here using all experts)
             topk_values, topk_indices = torch.topk(similarity, k=self.num_experts, dim=-1, largest=True, sorted=True)
@@ -216,7 +218,7 @@ class MoeficationMoE(MoELayer):
             # print("[DEBUG] Token[0,0] threshold (self.tau * total):", threshold[0, 0, 0].item())
 
             # 5) Build a boolean mask to decide which experts to keep
-            keep_mask = (cumsum_scores < threshold)
+            keep_mask = (cumsum_scores <= threshold)
             # Guarantee at least 1 expert remains per token:
             first_expert_mask = torch.zeros_like(keep_mask)
             first_expert_mask[..., 0] = True  # force the top expert to always be kept
@@ -231,58 +233,40 @@ class MoeficationMoE(MoELayer):
             routing_tensor = torch.zeros_like(similarity)  # (B, T, num_experts)
             keep_mask_float = keep_mask.type_as(routing_tensor)  # ensure same dtype
             routing_tensor.scatter_(2, topk_indices, keep_mask_float)
-            #print("[DEBUG] routing_tensor shape:", routing_tensor.shape)
-
-            # 7) Inspect the final routing decisions:
-            self.routing_mask = routing_tensor.sum(dim=-1)  # (B, T): number of experts selected per token
-            # For token[0,0]:
-            #print('Routing mask for first token', self.routing_mask.flatten())
+            num_selected_per_token = routing_tensor.sum(dim=-1)
         elif self.forward_mode == 'random':
             # Assume x has shape (B, T, d)
             B, T, d = x.size()  
             e = self.num_experts  # number of experts
-
             # Instead of computing x_expert_out = self.experts.forward_without_routing(x_expanded)
             # and thresholding the norms, we generate a random routing tensor with 1's with probability tau
-            # and 0's otherwise. The output routing_tensor will have shape (B, T, e)
-            routing_tensor = (torch.rand(B, T, e, device=x.device) < self.tau).float()
+            scores = torch.rand(B, T, e, device=x.device)
+            # 2) pick the k smallest (or largest) scores per token
+            k = max(1, int(e * self.tau))    # ensure at least one expert
+            topk = scores.topk(k, dim=-1, largest=False).indices   # (B, T, k)
 
-            # Optionally, for inspection you might want to know how many experts were selected per token,
-            # which will yield a tensor of shape (B, T) with counts.
-            self.routing_mask = routing_tensor.sum(dim=-1)
+            # 3) build your binary routing mask
+            routing_tensor = torch.zeros_like(scores, dtype=torch.float)
+            routing_tensor.scatter_(-1, topk, 1.0)       
         else:
             raise ValueError(f'Unsupported forward_mode: {self.forward_mode}')
-        
         return routing_tensor
     
     def forward(self, x):
-        # x is of size (batch_size, sequence_length, dim)
         routing_tensor = self.gate(x)
-
-        # Check if all tensors are equal to 1
-        #assert routing_tensor.eq(1).all(), "Routing tensor is not equal to 1"
         
         orig_size = x.size()
-        x = x.view(-1, x.size(-1))
-        #print('x', x.shape)
-        #print(' routing_tensor.view(-1, routing_tensor.size(-1)',  routing_tensor.view(-1, routing_tensor.size(-1)).shape)
+        x = x.reshape(-1, orig_size[-1])   
+
         with record_function("FFN_Experts"):
-        # torch.cuda.synchronize()
-        # start_time = time.time()
-            out = self.experts(x, routing_tensor.view(-1, routing_tensor.size(-1)))
-        # torch.cuda.synchronize()
-        # elapsed = time.time() - start_time
-        # print(f"Time for new FFN call: {elapsed * 1000.0:.3f} ms")
-        #print('out true experts', out.shape)
+            out = self.experts(x, routing_tensor.reshape(-1, routing_tensor.size(-1)))
 
         if self.bias:
             out = out + self.last_bias
         if self.add_residual_connection:
             out = out + x
         out = out.view(orig_size)
-        #print('Bias Last', self.last_bias.sum())
-
-        return out, {self.name: (routing_tensor,)}
+        return out, self.expert_dim * routing_tensor.sum()
 
 
 def replace_layer_with_moe(model, moefied_module_name, num_experts=None, expert_size=None,
@@ -294,27 +278,12 @@ def replace_layer_with_moe(model, moefied_module_name, num_experts=None, expert_
         # with nn.Linear layers at indices 0 and 3
         w1 = original_module[0]
         activation = type(original_module[1])
-    elif isinstance(original_module, GPTMLP):
-        w1 = original_module.c_fc
-        activation = type(original_module.act)
-    elif isinstance(original_module, GemmaMLP):
-        w1 = original_module.up_proj
-        activation = type(original_module.act_fn)
-    elif isinstance(original_module, BertLayer):
-        w1 = original_module.intermediate.dense
-        activation = type(original_module.intermediate.intermediate_act_fn)
-        moefied_intermediate_name = f'{moefied_module_name}.intermediate'
-        moefied_output_name = f'{moefied_module_name}.output'
-        org_module_name = moefied_module_name
-        moefied_module_name = f'{moefied_module_name}.mlp'
     elif isinstance(original_module, FFN):
         w1 = original_module.fc1
         activation = type(original_module.act)
     else:
         raise ValueError(f'Unsupported ffn type: {type(original_module)}')
     add_residual = True if isinstance(original_module, ResidualMLP) else False
-    add_intermediate_gating = True if isinstance(original_module, GemmaMLP) else False
-
     hidden_dim = w1.in_features
     d_ff = w1.out_features
     if num_experts is not None:
@@ -325,21 +294,9 @@ def replace_layer_with_moe(model, moefied_module_name, num_experts=None, expert_
         num_experts = d_ff // expert_size
     moe_layer = MoeficationMoE(moefied_module_name, hidden_dim, num_experts, w1.bias is not None, expert_size,
                                activation, experts_class, add_residual_connection=add_residual,
-                               add_intermediate_gating=add_intermediate_gating)
+                               add_intermediate_gating=False)
     logging.info(f'Replacing {moefied_module_name} (FFN hidden size {d_ff}) with {num_experts} experts')
     set_module_by_name(model, moefied_module_name, moe_layer)
-    if isinstance(model, GPT):
-        # TODO is there a better option to add dropout? MoefiedMLP does not have dropout,
-        #  but GPT MLP has it inside the module
-        dropout_layer_name = f'{moefied_module_name}.dropout'
-        set_module_by_name(model, dropout_layer_name, torch.nn.Dropout())
-    if isinstance(model, BertPreTrainedModel):
-        # TODO should we delete output layer?
-        # logging.info(f'Deleting original FFN modules...')
-        set_module_by_name(model, org_module_name + '.dropout', original_module.output.dropout)
-        set_module_by_name(model, org_module_name + '.ln', original_module.output.LayerNorm)
-        set_module_by_name(model, moefied_intermediate_name, None)
-        set_module_by_name(model, moefied_output_name, None)
 
 
 def replace_with_moes(original_model: nn.Module, num_experts: int = None, expert_size: int = None,
@@ -354,38 +311,8 @@ def replace_with_moes(original_model: nn.Module, num_experts: int = None, expert
     for name in modules_to_moeify:
         replace_layer_with_moe(model, name, num_experts, expert_size, experts_class)
 
-    # replace forwards so that gating data is also returned
-    if isinstance(model, (VisionTransformer, CustomVisionTransformer)):
-        for i in range(len(model.encoder.layers)):
-            model.encoder.layers[i].forward = partial(moe_vit_block_forward, model.encoder.layers[i])
-            if isinstance(model.encoder.layers[i].self_attention, CustomMultiheadAttention):
-                model.encoder.layers[i].self_attention.forward = partial(moe_attention_forward,
-                                                                         model.encoder.layers[i].self_attention)
-        model.encoder.forward = partial(moe_vit_encoder_forward, model.encoder)
-        model.forward = partial(moe_vit_main_forward, model)
-    elif isinstance(model, GPT):
-        for i in range(len(model.transformer.h)):
-            model.transformer.h[i].forward = partial(moe_gpt_block_forward, model.transformer.h[i])
-            if isinstance(model.transformer.h[i].attn, CustomMultiheadAttention):
-                model.transformer.h[i].attn.forward = partial(moe_attention_forward,
-                                                               model.transformer.h[i].attn)
-        model.forward = partial(moe_gpt_main_forward, model)
-    elif isinstance(model, BertPreTrainedModel):
-        for i in range(len(model.bert.encoder.layer)):
-            model.bert.encoder.layer[i].forward = partial(moe_bert_layer_forward, model.bert.encoder.layer[i])
-            if isinstance(model.bert.encoder.layer[i].attention, CustomMultiheadAttention):
-                # TODO this will explode for sure
-                model.bert.encoder.layer[i].attention.forward = partial(moe_attention_forward,
-                                                                        model.bert.encoder.layer[i].attention)
-                raise NotImplementedError()
-            model.forward = partial(moe_bert_main_forward, model)
-    elif isinstance(model, GemmaWrapper):
-        for i in range(len(model.gemma.model.layers)):
-            model.gemma.model.layers[i].forward = partial(moe_gemma_decoder_forward, model.gemma.model.layers[i])
-            if isinstance(model.gemma.model.layers[i].self_attn, CustomMultiheadAttention):
-                raise NotImplementedError('Custom attention not supported with Gemma')
-        model.gemma.forward = partial(moe_gemma_main_forward, model.gemma)
-    elif isinstance(model, NullDDP) or isinstance(getattr(model, 'module', None), NullDDP):
+    # If instance of VAR or wrapped VAR
+    if isinstance(model, NullDDP) or isinstance(getattr(model, 'module', None), NullDDP):
         model = model.module
         for i in range(len(model.blocks)):
             model.blocks[i].forward = partial(moe_var_block_forward, model.blocks[i])
@@ -409,13 +336,6 @@ def param_clustering_split(ffn, moe_layer):
     if isinstance(ffn, nn.Sequential):
         w1 = ffn[0]
         w2 = ffn[3]
-    elif isinstance(ffn, GPTMLP):
-        w1 = ffn.c_fc
-        w2 = ffn.c_proj
-    elif isinstance(ffn, BertLayer):
-        w1 = ffn.intermediate.dense
-        w2 = ffn.output.dense
-    elif isinstance(ffn, GemmaMLP):
         w1 = ffn.gate_proj # We cluster by gate projection weights because they are actually sparse
         w2 = ffn.down_proj
         w3 = ffn.up_proj
@@ -433,28 +353,7 @@ def param_clustering_split(ffn, moe_layer):
     labels = KMeansConstrained(n_clusters=num_experts, size_min=expert_size, size_max=expert_size) \
         .fit_predict(w1_normalized.detach().cpu().numpy())
 
-    # split weights into experts by labels
-    if isinstance(moe_layer.experts, ModuleBatchedExperts):
-        if isinstance(ffn, GemmaMLP):
-            raise NotImplementedError()
-        assert moe_layer.experts.depth == 2
-        # experts is a nn.ModuleList
-        # each expert is a nn.Sequential module
-        # with nn.Linear layers at indices 0 and 2
-        with torch.no_grad():
-            filled_neuron_counts = [0 for _ in range(num_experts)]
-            for neuron_index, expert_index in enumerate(labels):
-                expert_neuron_index = filled_neuron_counts[expert_index]
-                moe_layer.experts.e[expert_index][0].weight[expert_neuron_index].copy_(w1.weight[neuron_index])
-                if moe_layer.bias:
-                    moe_layer.experts.e[expert_index][0].bias[expert_neuron_index].copy_(w1.bias[neuron_index])
-                moe_layer.experts.e[expert_index][2].weight[:, expert_neuron_index].copy_(
-                    w2.weight[:, neuron_index])
-                filled_neuron_counts[expert_index] += 1
-            # copy the last layer bias
-            if moe_layer.bias:
-                moe_layer.last_bias.copy_(w2.bias)
-    elif isinstance(moe_layer.experts, ExecuteAllExperts):
+    if isinstance(moe_layer.experts, ExecuteAllExperts):
         assert moe_layer.experts.depth == 2
         with torch.no_grad():
             filled_neuron_counts = [0 for _ in range(num_experts)]
@@ -469,7 +368,6 @@ def param_clustering_split(ffn, moe_layer):
             # copy the last layer bias
             if moe_layer.bias:
                 moe_layer.last_bias.copy_(w2.bias)
-        
     elif isinstance(moe_layer.experts, CustomKernelExperts):
         assert moe_layer.experts.depth == 2
         with torch.no_grad():
@@ -483,21 +381,7 @@ def param_clustering_split(ffn, moe_layer):
                 filled_neuron_counts[expert_index] += 1
             # copy the last layer bias
             if moe_layer.bias:
-                moe_layer.last_bias.copy_(ffn.fc2.bias)
-
-            # print('Types')
-            # print('ffn.fc1.bias', ffn.fc1.bias.dtype)
-            # print('ffn.fc1.weight', ffn.fc1.weight.dtype)
-            # print('ffn.fc2.bias', ffn.fc2.bias.dtype)
-            # print('ffn.fc2.weight', ffn.fc2.weight.dtype)
-            # print('-'*100)
-            # print('oe_layer.experts.w1[expert_index, :, expert_neuron_index]', moe_layer.experts.w1[expert_index, :, expert_neuron_index].dtype)
-            # print('moe_layer.experts.b1[expert_index, expert_neuron_index]', moe_layer.experts.b1[expert_index, expert_neuron_index].dtype)
-            # print('moe_layer.experts.w2[expert_index, expert_neuron_index].', moe_layer.experts.w2[expert_index, expert_neuron_index].dtype)
-            # print('moe_layer.last_bias', moe_layer.last_bias.dtype)
-
-            
-            
+                moe_layer.last_bias.copy_(ffn.fc2.bias)       
     else:
         # TODO
         raise NotImplementedError('Other variants not handled yet')
@@ -520,7 +404,6 @@ def split_original_parameters(original_model: nn.Module, moe_model: nn.Module, r
         num_experts = moe_module.num_experts
         logging.info(f'Clustering parameters from {name} into {num_experts} experts')
         param_clustering_split(original_module, moe_module)
-
 
 class MoeficationRouter(nn.Module):
     def __init__(self, hidden_dim, num_experts, width=128, depth=2, bias=False, activation='tanh',

@@ -14,7 +14,6 @@ from train import TrainingContext, setup_accelerator, setup_data, setup_optimiza
     setup_state, in_training_eval, final_eval, make_vae
 from utils import load_model, get_module_by_name, add_save_activations_hook, save_state, get_lrs, Mixup
 from utils_var import arg_util
-from architectures.quant import VectorQuantizer2
 import dist
 from trainer import VARTrainer
 from architectures.pretrained import get_var_d16

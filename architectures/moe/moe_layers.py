@@ -58,7 +58,6 @@ class ExecuteAllExpertsLayer(nn.Module):
         return self.act(x)
 
 
-print_first = True
 class ExecuteAllExperts(ExpertsLayer):
     def __init__(self,
                  dim,
@@ -126,17 +125,6 @@ class ExecuteAllExperts(ExpertsLayer):
             return x
 
 
-class GLUExpert(nn.Module):
-    def __init__(self, d_model, d_intermediate, activation, bias, last_bias):
-        super().__init__()
-        self.gate = nn.Linear(d_model, d_intermediate, bias=bias)
-        self.up_scale = nn.Linear(d_model, d_intermediate, bias=bias)
-        self.activation = activation()
-        self.down_scale = nn.Linear(d_intermediate, d_model, bias=last_bias)
-
-    def forward(self, x):
-        return self.down_scale(self.activation(self.gate(x)) * self.up_scale(x))
-
 
 class ExpertIntermediateActivationExtractionStub(nn.Module):
     def __init__(self):
@@ -199,7 +187,7 @@ class CustomKernelExperts(ExpertsLayer):
     def forward(self, x, routing_tensor):
         assert x.dim() == 2, f'{x.size()=}'
         # x is of size (batch_size * sequence_length, dim)
-        # routing_tensor is of size (batch_size * sequence_length, num_experts)
+        # routing_tensor is of size (batch_size * sequence_length, num_experts)        
         if self._forward_mode == 'masked':
             res = self.forward_all(x, routing_tensor)
         elif self._forward_mode == 'naive':
@@ -301,145 +289,9 @@ class CustomKernelExperts(ExpertsLayer):
         return final_out
 
 
-class ModuleBatchedExperts(ExpertsLayer):
-    def __init__(self,
-                 dim,
-                 num_experts,
-                 depth=2,
-                 expert_dim=None,
-                 bias=True,
-                 activation=nn.GELU,
-                 intermediate_gating=False):
-        super().__init__()
-        assert depth >= 2
-        self.num_experts = num_experts
-        self.depth = depth
-        self.expert_dim = dim * 2 if expert_dim is None else expert_dim
-        self.bias_mode = bias
-        self.intermediate_gating = intermediate_gating
-        if intermediate_gating and depth > 2:
-            raise NotImplementedError('Intermediate gating not supported for depth > 2')
-
-        self.e = nn.ModuleList()
-        for _ in range(num_experts):
-            if self.intermediate_gating:
-                bias = True if self.bias_mode != False else False
-                last_bias = False if (self.bias_mode == False or self.bias_mode == 'without_last') else True
-                current_expert = GLUExpert(
-                    dim,
-                    self.expert_dim,
-                    activation,
-                    bias,
-                    last_bias
-                )
-            else:
-                current_expert = torch.nn.Sequential()
-                bias = True if self.bias_mode == 'without_last' else self.bias_mode
-                current_expert.append(nn.Linear(dim, expert_dim, bias=bias))
-                current_expert.append(activation())
-                for _ in range(depth - 2):
-                    current_expert.append(nn.Linear(expert_dim, expert_dim, bias=bias))
-                    current_expert.append(activation())
-                bias = False if self.bias_mode == 'without_last' else self.bias_mode
-                current_expert.append(nn.Linear(expert_dim, dim, bias=bias))
-            self.e.append(current_expert)
-
-    def forward(self, x, routing_tensor):
-        assert not torch.any(torch.isnan(x)), f'{x=}'
-        assert x.dim() == 2, f'{x.size()=}'
-        # x is of size (batch_size * sequence_length, dim)
-        # routing_tensor is of size (batch_size * sequence_length, num_experts)
-        outputs = torch.zeros_like(x)
-        for i in range(self.num_experts):
-            current_expert_routing_tensor = routing_tensor[:, i]
-            current_expert_samples_mask = current_expert_routing_tensor != 0.0
-            current_expert_samples_scores = current_expert_routing_tensor[current_expert_samples_mask].unsqueeze(1)
-            current_expert_x = x[current_expert_samples_mask]
-            assert current_expert_samples_scores.dim() == 2, f'{current_expert_samples_scores.size()=}'
-            current_expert_x = self.e[i](current_expert_x) * current_expert_samples_scores
-            outputs[current_expert_samples_mask] += current_expert_x
-        return outputs
-
-
-class BatchedExperts(ExpertsLayer):
-    def __init__(self,
-                 dim,
-                 num_experts,
-                 depth=2,
-                 expert_dim=None,
-                 bias=True,
-                 activation=nn.GELU,
-                 intermediate_gating=False):
-        super().__init__()
-        assert depth >= 2
-        self.num_experts = num_experts
-        self.depth = depth
-        self.expert_dim = dim * 2 if expert_dim is None else expert_dim
-        self.bias_mode = bias
-        bias = True if self.bias_mode == 'without_last' else self.bias_mode
-        if intermediate_gating:
-            raise NotImplementedError()
-        # assumes homogeneous experts
-        self.weights = nn.ParameterList()
-        if bias:
-            self.biases = nn.ParameterList()
-        # add weights for the first layer
-        w = init_(torch.empty(num_experts, dim, expert_dim))
-        self.weights.append(w)
-        if bias:
-            self.biases.append(torch.zeros(num_experts, 1, expert_dim))
-        # add weights for the intermediate layers
-        for _ in range(depth - 2):
-            w = init_(torch.zeros(num_experts, expert_dim, expert_dim))
-            self.weights.append(w)
-            if bias:
-                self.biases.append(torch.zeros(num_experts, 1, expert_dim))
-        # add weights for the last layer
-        w = init_(torch.zeros(num_experts, expert_dim, dim))
-        self.weights.append(w)
-        bias = True if self.bias_mode == 'without_last' else self.bias_mode
-        if bias:
-            self.biases.append(torch.zeros(num_experts, 1, dim))
-        self.act = activation()
-
-    def expert_forward(self, x: torch.Tensor, expert_index: int):
-        # x is of size (batch_size * sequence_length, dim)
-        # expert index is an int
-        if self.bias_mode is True:
-            for i in range(0, self.depth - 1):
-                x = self.act(x @ self.weights[i][expert_index] + self.biases[i][expert_index])
-            x = x @ self.weights[self.depth - 1][expert_index] + self.biases[self.depth - 1][expert_index]
-        elif self.bias_mode == 'without_last':
-            for i in range(0, self.depth - 1):
-                x = self.act(x @ self.weights[i][expert_index] + self.biases[i][expert_index])
-            x = x @ self.weights[self.depth - 1][expert_index]
-        else:
-            for i in range(0, self.depth - 1):
-                x = self.act(x @ self.weights[i][expert_index])
-            x = x @ self.weights[self.depth - 1][expert_index]
-        return x
-
-    def forward(self, x, routing_tensor):
-        assert not torch.any(torch.isnan(x)), f'{x=}'
-        assert x.dim() == 2, f'{x.size()=}'
-        # x is of size (batch_size * sequence_length, dim)
-        # routing_tensor is of size (batch_size * sequence_length, num_experts)
-        outputs = torch.zeros_like(x)
-        for i in range(self.num_experts):
-            current_expert_routing_tensor = routing_tensor[:, i]
-            current_expert_samples_mask = current_expert_routing_tensor != 0.0
-            current_expert_samples_scores = current_expert_routing_tensor[current_expert_samples_mask].unsqueeze(1)
-            current_expert_x = x[current_expert_samples_mask]
-            assert current_expert_samples_scores.dim() == 2, f'{current_expert_samples_scores.size()=}'
-            current_expert_x = self.expert_forward(current_expert_x, i) * current_expert_samples_scores
-            outputs[current_expert_samples_mask] += current_expert_x
-        return outputs
-
 
 MOE_IMPL_MAP = {
     'execute_all': ExecuteAllExperts,
-    'module': ModuleBatchedExperts,
-    'batched': BatchedExperts,
     'custom_kernel': CustomKernelExperts,
 }
 

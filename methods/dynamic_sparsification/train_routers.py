@@ -1,63 +1,48 @@
+#!/usr/bin/env python3
+import os
+import re
+import ast
+import math
+import random
 import logging
+import shutil
+import copy
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import Callable, Dict, List, Type
 
+import numpy as np
 import torch
+import torchvision
+from torch import nn, autocast
+from torch.profiler import profile, record_function, ProfilerActivity, tensorboard_trace_handler
+
 from omegaconf import OmegaConf
-from torch import nn
+import PIL.Image as PImage
+import PIL.ImageDraw as PImageDraw
+from PIL import Image
+from tqdm import tqdm
+
+import torch_fidelity
 
 from architectures.moe.moe_layers import ExecuteAllExperts, CustomKernelExperts
-from architectures.moe.moefication import add_routers, MoeficationMoE
+from architectures.moe.moefication import add_routers, MoeficationMoE, replace_with_moes
+from architectures.moe.dsti import dsti_mlp_filter_condition, replace_with_relu, find_gelu_activations
+from architectures.pretrained import get_var_d16
+
 from common import get_default_args, INIT_NAME_MAP, LOSS_NAME_MAP
-from eval import benchmark_moe, online_evaluate_moe, score_moe, autoregressive_infer_cfg_with_expert_plot
-from train import TrainingContext, setup_accelerator, setup_data, setup_optimization, setup_files_and_logging, \
-    setup_state, make_vae
-from utils import load_model, save_state, remove_hooks, save_final, Mixup, get_lrs, \
-    get_module_name, add_save_inputs_hook, add_save_output_norm_hook
+from eval import autoregressive_infer_cfg_with_expert_plot
+from train import TrainingContext, setup_accelerator, setup_data, setup_optimization, setup_files_and_logging, setup_state, make_vae
+from utils import (load_model, save_state, remove_hooks, save_final,
+                   Mixup, get_lrs, get_module_name,
+                   add_save_inputs_hook, add_save_output_norm_hook)
 from utils_var import arg_util
 from utils_var.misc import create_npz_from_sample_folder
 from trainer import VARTrainer
 import dist
-from architectures.moe.dsti import dsti_mlp_filter_condition
-from architectures.moe.moefication import replace_with_moes
-from architectures.pretrained import get_var_d16  
-from pathlib import Path
-from architectures.moe.dsti import replace_with_relu
-from architectures.moe.dsti import find_gelu_activations
-import copy
-import PIL.Image as PImage, PIL.ImageDraw as PImageDraw
-import random
-import torch, torchvision
-import numpy as np
-import os
-import os
-import torch
-import numpy as np
-import random
-from tqdm import tqdm
-from PIL import Image
-import shutil
 from collections import OrderedDict
-import torch
-import torch.nn as nn
-from torch import autocast
-import matplotlib.pyplot as plt
-import torch_fidelity
-import os
-import re
-import ast
-import matplotlib.pyplot as plt
-from PIL import Image
-import time
-from torch._C._profiler import ProfilerActivity
-import torch
-from torch.profiler import profile, record_function, ProfilerActivity, tensorboard_trace_handler
-import torch
-import random
-import numpy as np
-import os
-import shutil
-from PIL import Image
+
 
 
 class RouterTrainingContext(TrainingContext):
@@ -116,9 +101,7 @@ def setup_model(args, tc):
 
     # Base class
     model, tc.model_vae = get_var_d16()
-    tc.initial_model = copy.deepcopy(model)
-
-    #_ , debug_data = make_image(tc.initial_model, args)
+    model.set_dense_module(scale_switch=args.expert_index_switch)
 
     if args.activation in ['gelu', 'relu']:
         init_path = Path(args.path_file_ft)
@@ -132,7 +115,8 @@ def setup_model(args, tc):
 
         model = model.to(args.device)
         new_state_dict = OrderedDict((k.replace("module.", ""), v) for k, v in state_dict.items())
-        model.load_state_dict(new_state_dict)
+        model.load_state_dict(new_state_dict, strict=False)
+
 
         final_path = Path(args.path_file_moe)
         final_state = torch.load(final_path, map_location=args.device)
@@ -141,225 +125,18 @@ def setup_model(args, tc):
         model, _ = replace_with_moes(model, **model_arg, module_filter_contition=dsti_mlp_filter_condition)
         model = model.to(args.device)
 
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=False)
         tc.moe_modules = add_routers(model, args.model_args)
 
     if args.use_router:
-        final_router_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/' + args.final_path_save + "_router" + "/final.pth")
+        final_router_path = Path('/home/jvincenti/D2DMoE/shared/results/effbench_runs/' + args.final_path_save + "_router_e" + str(args.model_experts_size)  + "/final.pth")
         final_state = torch.load(final_router_path, map_location=args.device)
         state_dict = final_state['model_state']
         model_arg = final_state['args'].model_args
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=False)
+
     
     tc.model = tc.accelerator.prepare(model)
-
-
-    if not args.fid and args.debug:
-        for tau in args.dsti_tau_to_eval:
-            seed = 0
-            torch.manual_seed(seed)
-            random.seed(seed)
-            np.random.seed(seed)
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
-
-            tf32 = True
-            torch.backends.cudnn.allow_tf32 = bool(tf32)
-            torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
-            torch.set_float32_matmul_precision('high' if tf32 else 'highest')
-            tc.model.rng.manual_seed(seed)
-            rng = tc.model.rng
-
-            # ------------------------------------------------------------------------------
-            # 2. Configure output folder and sampling parameters.
-            # ------------------------------------------------------------------------------
-            type_of_model = (
-                "MoE_FT_Gelu" if args.activation == "gelu" 
-                else "MoE_FT_Relu" if args.activation == "relu" 
-                else "MoE_no_FT"
-            )
-            #os.makedirs(sample_folder, exist_ok=True)
-            # Check if directory exists
-                
-            cfg                = 4 #1.5
-            more_smooth        = False
-
-            class_labels = (1,)  #@param {type:"raw"}
-            
-            B = len(class_labels)
-            label_B: torch.LongTensor = torch.tensor(class_labels, device=args.device)
-
-            # Autoregressive sampling
-            with torch.inference_mode():
-                with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):
-                    recon_B3HW, _, _, _ = autoregressive_infer_cfg_with_expert_plot(tc=tc, B=B, label_B=label_B, cfg=cfg, top_k=900, top_p=0.95, rng=rng, more_smooth=more_smooth, tau=tau, debug_data=debug_data, compare_dicts=True, type_of_model=type_of_model, final_path_save=args.final_path_save)
-        
-    if args.fid:
-        for tau in args.dsti_tau_to_eval:
-            print('tau', tau)
-            seed = 0
-            torch.manual_seed(seed)
-            random.seed(seed)
-            np.random.seed(seed)
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
-
-            tf32 = True
-            torch.backends.cudnn.allow_tf32 = bool(tf32)
-            torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
-            torch.set_float32_matmul_precision('high' if tf32 else 'highest')
-
-            tc.model.rng.manual_seed(seed)
-            tc.initial_model.rng.manual_seed(seed)
-
-            rng = tc.model.rng
-            rng_2 = tc.initial_model.rng
-
-            # ------------------------------------------------------------------------------
-            # 2. Configure output folder and sampling parameters.
-            # ------------------------------------------------------------------------------
-            type_of_model = (
-                "MoE_FT_Gelu" if args.activation == "gelu" 
-                else "MoE_FT_Relu" if args.activation == "relu" 
-                else "MoE_no_FT"
-            )
-
-            if args.use_router:
-                forward_mode = 'dynk_max' #'centroids'
-            else:
-                forward_mode = 'oracle' #'centroids' 
-
-            sample_folder  = f'../../../../scratch-shared/jvincenti/{args.final_path_save}_with_router_{args.use_router}_tau_{tau}_samples_256x256'  # Where to save the 50,000 PNGs
-            sample_folder_var = f'../../../../scratch-shared/jvincenti/base_var_tau_{tau}_samples_256x256'
-
-            print(sample_folder,'sample_folder')
-
-            num_classes        = 1000               #  1000 ImageNet classes
-            samples_per_class  = 10                 #  10k total
-            cfg                = 1.5
-            top_p              = 0.96
-            top_k              = 900
-            more_smooth        = False
-   
-            output_dir = f'CUDA_Profile_tensorboard/{args.final_path_save}'
-            os.makedirs(output_dir, exist_ok=True)
-
-
-            os.makedirs(sample_folder, exist_ok=True)
-            if args.final_path_save =='base_data_moe' and tau == 1.0: 
-                os.makedirs(sample_folder_var, exist_ok=True)
-
-            # Assume num_classes and samples_per_class are defined.
-            # Create a list of labels: each class is repeated samples_per_class times.
-            all_labels = []
-            for class_idx in range(num_classes):
-                all_labels.extend([class_idx] * samples_per_class)
-            all_labels = np.array(all_labels)
-
-            # Define your new batch size B (which can be greater than samples_per_class)
-            B = args.batch_size_eff  # e.g., B = 128
-
-            num_total_samples = len(all_labels)
-            num_batches = num_total_samples // B
-            warmup_batches = num_batches // 2
-
-            final_flops = 0
-            final_mean_flops = 0
-            batch_time = 0
-            batch_time_base = 0
-
-            recon_samples = {}      # dict mapping class_idx -> image (tensor or PIL)
-            recon_var_samples = {}  # dict mapping class_idx -> image (tensor or PIL)
-
-            output_dir = f'CUDA_Profile_tensorboard/{args.final_path_save}'
-            os.makedirs(output_dir, exist_ok=True)
-
-            TOTAL_PROFILER_STEPS = 5 + 2 + 2 + 1  # Equals 10
-            
-            # with profile(
-            #     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            #     schedule=torch.profiler.schedule(
-            #         skip_first=5,
-            #         wait=2,
-            #         warmup=2,
-            #         active=1,
-            #         repeat=1
-            #         ),
-            #     on_trace_ready=tensorboard_trace_handler(output_dir, worker_name=f"{args.model_experts_size}_{tau}"),
-            #     record_shapes=True,
-            #     profile_memory=True
-            # ) as prof:
-            for batch_idx in range(num_batches):
-                # Create label_B for the batch: a combination of class indices.
-                batch_labels = all_labels[batch_idx * B : (batch_idx + 1) * B]
-                label_B = torch.tensor(batch_labels, device='cuda')
-                
-                # Autoregressive sampling with batch size B.
-                with torch.no_grad():
-                    with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):
-                            if args.dsti_tau_as_list:
-                                recon_B3HW, mean_flops, total_flops = autoregressive_infer_cfg_with_expert_plot(
-                                    tc=tc, B=B, label_B=label_B, cfg=cfg, top_k=top_k, top_p=top_p,
-                                    rng=rng, more_smooth=more_smooth, tau=1.0, debug_data=None,
-                                    compare_dicts=False, type_of_model=type_of_model, final_path_save=None, forward_mode=forward_mode,
-                                    taus = tau, expert_index_switch = args.expert_index_switch
-                                )
-                            else:
-                                recon_B3HW, mean_flops, total_flops = autoregressive_infer_cfg_with_expert_plot(
-                                    tc=tc, B=B, label_B=label_B, cfg=cfg, top_k=top_k, top_p=top_p,
-                                    rng=rng, more_smooth=more_smooth, tau=tau, debug_data=None,
-                                    compare_dicts=False, type_of_model=type_of_model, final_path_save=None, forward_mode=forward_mode,
-                                    taus = False, expert_index_switch = args.expert_index_switch
-                                )
-                            final_mean_flops += mean_flops
-                            final_flops += total_flops
-                    # torch.cuda.synchronize()
-                    # prof.step()
-                    
-                    # if batch_idx + 1 >= TOTAL_PROFILER_STEPS:
-                    #     break
-
-                    batch_images = recon_B3HW.detach().cpu()  # shape: (B, C, H, W)
-                    # Convert the full batch: move channel to last dimension, scale, and cast
-                    np_images = (batch_images.permute(0, 2, 3, 1).numpy() * 255).astype(np.uint8)
-                    for i, img_array in enumerate(np_images):
-                        img_pil = Image.fromarray(img_array)
-                        global_idx = batch_idx * B + i
-                        filename = f"class_{batch_labels[i]:04d}_{global_idx:05d}.png"
-                        img_pil.save(os.path.join(sample_folder, filename))
-
-
-
-        #print(f"Done! Images saved to: {sample_folder}")
-        final_flops = final_flops/(num_batches*2*B)
-        final_mean_flops = final_mean_flops/num_batches
-        # Now calculate_metrics:
-        input2 = None
-        fid_statistics_file = 'adm_in256_stats.npz'
-
-        metrics_dict = torch_fidelity.calculate_metrics(
-            input1=sample_folder,
-            input2=input2,
-            fid_statistics_file=fid_statistics_file,
-            cuda=True,
-            isc=True,
-            fid=True,
-            kid=False,
-            prc=False,
-            verbose=False,
-        )
-        print("*"*100)
-        print(f'Final Fid for {tau}', args.final_path_save)
-        print(metrics_dict)
-        print('Total Flops per sample', final_flops)
-        print('Average Flops per sample', final_mean_flops)
-        # print(f"Batch generation took {batch_time:.6f} seconds")
-        print("*"*100)
-        shutil.rmtree(sample_folder)
-
-    if args.debug:
-        raise ValueError("args.debug is true therefore stopping here.")
-
 
 def set_for_train_iteration(tc):
     tc.model.eval()
@@ -426,16 +203,6 @@ def set_for_eval_with_topk(tc, k):
             m.forward_mode = 'topk'
             m.k = k
 
-
-def in_training_eval(args, tc):
-    unwrapped_model = tc.accelerator.unwrap_model(tc.model)
-    set_for_eval_with_topk(tc, 1)
-    cost_without_experts, token_expert_costs, model_params = benchmark_moe(unwrapped_model, tc.test_loader, tc)
-    
-    for tau in args.tau:
-        set_for_eval_with_dynk(tc, tau, args.dsti_expert_selection_mode)
-        cost_without_experts, token_expert_costs, model_params = benchmark_moe(unwrapped_model, tc.test_loader, tc)
-
 def training_loop(args, tc):
     model_saved = datetime.now()
     train_iter = iter(tc.train_loader)
@@ -467,14 +234,13 @@ def training_loop(args, tc):
 
       
         # model evaluation
-        #in_training_eval(args, tc)
         tc.optimizer.zero_grad(set_to_none=True)
         set_for_train_iteration(tc) # Set forwardmore to 'all'
         # Account for gradient accumulation
         running_loss = 0
 
         X, y = next(train_iter)
-        # forward
+   
         with torch.no_grad():    
             B, V = y.shape[0], tc.model_vae.vocab_size
             X = X.to(dist.get_device(), non_blocking=True)
@@ -607,183 +373,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-    # # Now check each block's FFN experts:
-    
-    # for i, block in enumerate(tc.model.blocks):
-    #     if hasattr(block, "ffn") and hasattr(block.ffn, "experts"):
-    #         expert_weights = [expert.w.data for expert in block.ffn.experts.layers]
-            
-    #         # Check fc1 and fc2
-    #         for jk in range(1, 3):
-    #             ffn_key = f"blocks.{i}.ffn.fc{jk}.weight"
-    #             if ffn_key not in initial_weights:
-    #                 print(f"Block {i}: Key {ffn_key} not found in initial weights.")
-    #                 continue
-
-    #             original_ffn_weight = initial_weights[ffn_key]
-
-    #             # 1) We'll just check the sum of all experts' weights
-    #             #    to see if it's the same as the sum of the original layer's weight.
-    #             # For example, sum up absolute or plain sums, or do a norm, etc.
-    #             # We'll do a plain sum here.
-    #             expert_sum = 0.0
-    #             for w in expert_weights[jk - 1]:  # w => shape [whatever dims…]
-    #                 expert_sum += w.sum().item()  # w is a 2D or 3D tensor, so .sum() is the sum of all elements.
-
-    #             # Then compare with the original weight's sum:
-    #             original_sum = original_ffn_weight.sum().item()
-
-    #             sum_diff = abs(expert_sum - original_sum)
-    #             if sum_diff < 1e-4:  # pick a threshold that’s good for your scale
-    #                 print(f"Block {i} fc{jk}: The sum of all experts' weights ~ the sum of original FFN weights. sum_diff={sum_diff:.5f}")
-    #             else:
-    #                 print(f"Block {i} fc{jk}: The sum of experts' weights != original. sum_diff={sum_diff:.5f}")
-    #                 unchanged = False
-
-    #             # 2) Optionally, do more advanced checks (like L2 norm or a direct reorder).
-    #             #    e.g., check L2 norm if you prefer:
-    #             #    expert_l2, orig_l2 = 0.0, torch.norm(original_ffn_weight).item()
-    #             #    for w in expert_weights[jk - 1]:
-    #             #        expert_l2 += w.pow(2).sum().item()
-    #             #    expert_l2 = math.sqrt(expert_l2)
-    #             #    diff_l2 = abs(expert_l2 - orig_l2)
-    #             #    # etc.
-
-
-    #                 # set args
-
-
-
-    
-    # # Check non-FFN parameters normally:
-    # for name, param in tc.model.named_parameters():
-    #     if "ffn" not in name:
-    #         if not torch.allclose(param, initial_weights[name], rtol=0, atol=0):
-    #             print(f"Parameter {name} changed!")
-
-        # for tau in args.dsti_tau_to_eval:
-        #     seed = 0
-        #     torch.manual_seed(seed)
-        #     random.seed(seed)
-        #     np.random.seed(seed)
-        #     torch.backends.cudnn.deterministic = True
-        #     torch.backends.cudnn.benchmark = False
-
-        #     tf32 = True
-        #     torch.backends.cudnn.allow_tf32 = bool(tf32)
-        #     torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
-        #     torch.set_float32_matmul_precision('high' if tf32 else 'highest')
-        #     tc.model.rng.manual_seed(seed)
-        #     rng = tc.model.rng
-
-        #     # ------------------------------------------------------------------------------
-        #     # 2. Configure output folder and sampling parameters.
-        #     # ------------------------------------------------------------------------------
-        #     type_of_model = (
-        #         "MoE_FT_Gelu" if args.activation == "gelu" 
-        #         else "MoE_FT_Relu" if args.activation == "relu" 
-        #         else "MoE_no_FT"
-        #     )
-        #     sample_folder  = f'../../../../scratch-shared/jvincent with base VARi}_tau_{tau}_samples_256x256'  # Where to save the 50,000 PNGs
-            
-        #     os.makedirs(sample_folder, exist_ok=True)
-        #     # Check if directory exists
-        #     num_classes        = 1000               # e.g. 1000 ImageNet classes
-        #     samples_per_class  = 50                 # 50 images per class => 50k total
-        #     cfg                = 1.5
-        #     top_p              = 0.96
-        #     top_k              = 900
-        #     more_smooth        = False
-                
-        #     for class_idx in tqdm(range(num_classes), desc='Sampling'):
-        #         # Create a batch of size = samples_per_class with the same class label
-        #         label_B = torch.tensor([class_idx] * samples_per_class, device='cuda')
-                
-        #         # Autoregressive sampling
-        #         with torch.inference_mode():
-        #             with torch.autocast('cuda', enabled=True, dtype=torch.float16):
-        #                 recon_B3HW = autoregressive_infer_cfg_with_expert_plot(tc=tc, B=samples_per_class, label_B=label_B, cfg=cfg, top_k=900, top_p=0.95, rng=rng, more_smooth=more_smooth, tau=tau, debug_data=debug_data, compare_dicts=False, type_of_model=type_of with base VAR_=None)
-                
-        #         # recon_B3HW should have shape [B, 3, H, W]. Save each image in the batch.
-        #         for i in range(samples_per_class):
-        #             # Convert each image [3,H,W] to a PIL Image (uint8)
-        #             # Scale from [0,1] or [-1,1] as needed, depending on your model’s output
-        #             # Here we assume recon_B3HW is in [0,1]. If it's in another scale,
-        #             # adjust the multiplication and clamp accordingly.
-        #             img_tensor = recon_B3HW[i].detach().cpu().clamp(0,1)
-        #             img_pil = Image.fromarray(
-        #                 (img_tensor.permute(1,2,0).numpy() * 255).astype(np.uint8)
-        #             )
-                    
-        #             # Build filename like 00000001_123.png, indicating (class_####) + image index
-        #             filename = f"class_{class_idx:04d}_{i:02d}.png"
-        #             img_pil.save(os.path.join(sample_folder, filename))
-
-        #     print(f"Done! Images saved to: {sample_folder}")
-
-        #     # ------------------------------------------------------------------------------
-        #     # 4. (Optional) Build the .npz file for FID/IS evaluation
-        #     #    using your provided helper function:
-        #     # ------------------------------------------------------------------------------
-        #     # from utils.misc import create_npz_from_sample_folder
-        #     npz_path = create_npz_from_sample_folder(sample_folder)
-        #     print(f"Saved .npz file to {npz_path}")
-
-
-            # # # Now check each block's FFN experts:
-    
-    # for i, block in enumerate(tc.model.blocks):
-    #     if hasattr(block, "ffn") and hasattr(block.ffn, "experts"):
-    #         expert_weights = [expert.w.data for expert in block.ffn.experts.layers]
-            
-    #         # Check fc1 and fc2
-    #         for jk in range(1, 3):
-    #             ffn_key = f"blocks.{i}.ffn.fc{jk}.weight"
-    #             if ffn_key not in initial_weights:
-    #                 print(f"Block {i}: Key {ffn_key} not found in initial weights.")
-    #                 continue
-
-    #             original_ffn_weight = initial_weights[ffn_key]
-
-    #             # 1) We'll just check the sum of all experts' weights
-    #             #    to see if it's the same as the sum of the original layer's weight.
-    #             # For example, sum up absolute or plain sums, or do a norm, etc.
-    #             # We'll do a plain sum here.
-    #             expert_sum = 0.0
-    #             for w in expert_weights[jk - 1]:  # w => shape [whatever dims…]
-    #                 expert_sum += w.sum().item()  # w is a 2D or 3D tensor, so .sum() is the sum of all elements.
-
-    #             # Then compare with the original weight's sum:
-    #             original_sum = original_ffn_weight.sum().item()
-
-    #             sum_diff = abs(expert_sum - original_sum)
-    #             if sum_diff < 1e-4:  # pick a threshold that’s good for your scale
-    #                 print(f"Block {i} fc{jk}: The sum of all experts' weights ~ the sum of original FFN weights. sum_diff={sum_diff:.5f}")
-    #             else:
-    #                 print(f"Block {i} fc{jk}: The sum of experts' weights != original. sum_diff={sum_diff:.5f}")
-    #                 unchanged = False
-
-    #             # 2) Optionally, do more advanced checks (like L2 norm or a direct reorder).
-    #             #    e.g., check L2 norm if you prefer:
-    #             #    expert_l2, orig_l2 = 0.0, torch.norm(original_ffn_weight).item()
-    #             #    for w in expert_weights[jk - 1]:
-    #             #        expert_l2 += w.pow(2).sum().item()
-    #             #    expert_l2 = math.sqrt(expert_l2)
-    #             #    diff_l2 = abs(expert_l2 - orig_l2)
-    #             #    # etc.
-
-
-    #                 # set args
-
-    # Check non-FFN parameters normally:
-    # if args.activation in ['relu']:
-    #     for name, param in tc.model.named_parameters():
-    #         if "ffn" not in name:
-    #             if torch.allclose(param, initial_weights[name], rtol=0, atol=0):
-    #                 raise ValueError("Params have not changed")
 
 
 

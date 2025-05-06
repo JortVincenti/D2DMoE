@@ -8,10 +8,9 @@ from common import get_default_args
 from methods.dynamic_sparsification.expert_split import train as dsti_expert_split
 from methods.dynamic_sparsification.rep_distill_train import train as mha_distill
 from methods.dynamic_sparsification.sparse_finetuning import train as sparse_finetune
-from methods.dynamic_sparsification.train_routers import train as dsti_train_routers
+from methods.dynamic_sparsification.prune_var import train as pruned_var
 from train import train
 from utils import generate_run_name, submit_job
-
 
 
 def load_env_variables(file_path):
@@ -41,7 +40,7 @@ def main():
     # partition = 'rtx3080'
     # partition = 'batch'
 
-    timeout = 20 #60 * 24 * 7
+    timeout = 60 #60 * 24 * 7
     # timeout = 60 * 24 * 2
 
     gpus_per_task = 1
@@ -101,56 +100,58 @@ def main():
     exp_names = []
     display_names = []
 
+    # ════════════════════════ dsti router training model settings ════════════════════════ #
 
-    # # ════════════════════════ MHA replacement model settings ════════════════════════ #
-    # # Jort: Second job to run 
-    dsti_gpus_per_task = 1
-    # dsti_gpus_per_task = 3
     # dsti_gpus_per_task = 4
+    dsti_gpus_per_task = 1
 
-    distillation_args = deepcopy(common_args)
-    distillation_args.model_class = 'mha_rep_distill'
-    distillation_args.model_args = {}
-    distillation_args.model_args.flops_factor = 1.0
-    distillation_args.model_args.mlp_type = 'simple'
-    # distillation_args.model_args.mlp_type = 'residual'
-    distillation_args.model_args.dropout = 0.05
-    # distillation_args.model_args.dropout = 0.0
-    distillation_args.epochs = 1
-    # distillation_args.epochs = 1
-    # distillation_args.epochs = 0
-    # distillation_args.epochs = 0.1
-    distillation_args.batch_size = 128
-    # distillation_args.batch_size = 64
-    distillation_args.dsti_distill_loss_type = 'mse'
-    distillation_args.eval_points = 0
-    distillation_args.optimizer_args.lr = 0.001
-    #
-    # distillation_args.dsti_enforce_weight = 1e-2
-    distillation_args.dsti_enforce_weight = 0 #1e-3
-    # distillation_args.dsti_enforce_weight = 8e-4
-    # distillation_args.dsti_enforce_weight = 1e-4
-    # distillation_args.dsti_enforce_weight = 1e-5
-    distillation_args.dsti_enforce_mode = 'relu_hoyer'
-    # distillation_args.dsti_enforce_mode = 'relu_l1'
-    distillation_args.dsti_enforce_schedule = None #'linear'
-    # doesn't work with mixed precision yet
-    # distillation_args.mixed_precision = 'bf16'
+    dsti_routing_args = deepcopy(common_args)
+    dsti_routing_args.model_class = 'dsti_router'
+    dsti_routing_args.router_loss_type = 'mse' #'huber' #'mse'
+    dsti_routing_args.epochs = 1
+    # dsti_routing_args.epochs = 0.1
+    dsti_routing_args.batch_size = 256
+    
+    # dsti_routing_args.batch_size = 64
+    dsti_routing_args.optimizer_args.lr = 0.001
+    dsti_routing_args.model_args = {}
+    dsti_routing_args.model_args.depth = 2
+    dsti_routing_args.model_args.width = 128
+    # dsti_routing_args.model_args.width = 32
+    # dsti_routing_args.model_args.width = 16
+    # dsti_routing_args.model_args.activation = 'gelu'
+    dsti_routing_args.model_args.activation = 'gelu'
+    # dsti_routing_args.model_args.activation = 'tanh'
+    dsti_routing_args.model_args.output_activation = 'abs'
+    # dsti_routing_args.model_args.output_activation = 'relu'
+    # dsti_routing_args.model_args.output_activation = 'identity'
+    dsti_routing_args.dsti_router_labels_layer = 'output'
+    dsti_routing_args.dsti_router_labels_norm = 2
+    
+    #dsti_routing_args.dsti_expert_selection_mode = 'dynk_max'
+    dsti_routing_args.eval_points = 4
+    # dsti_routing_args.eval_points = 0
+    dsti_routing_args.mixed_precision = None
+    #dsti_routing_args.mixed_precision = 'bf16'
+    # # ════════════════════════ dsti router training ════════════════════════ #
+    dsti_routing_args.batch_size_eff = 128
+    dsti_routing_args.expert_index_switch = 8
+    dsti_routing_args.pruning_percentage = [0.08, 0.06, 0.05, 0.03, 0.01,0.00]
+    args = deepcopy(dsti_routing_args)
+    executor.update_parameters(slurm_additional_parameters={})
+    submit_job(executor, pruned_var, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
+    # ═════════════════════════════════════════════════════════ #
 
-    # # # ════════════════════════ MHA distillation into non-linear QKVO modules ════════════════════════ #
-    base_distill_exp_names = []
-    for exp_id in exp_ids:
-        args = deepcopy(distillation_args)
-        args.exp_id = exp_id
-        exp_name, run_name = generate_run_name(args)
-        # base_run_name = f'{base_exp_name}_{exp_id}'
-        executor.update_parameters(slurm_additional_parameters={})
-        job = submit_job(executor, mha_distill, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
-        jobs.append(job)
-        run_to_job_map[run_name] = job
-    exp_names.append(exp_name)
-    base_distill_exp_names.append(exp_names[-1])
-    display_names.append(f'MHA distillation')
+    print(f"Exp names: {exp_names}")
+    print(f"Display names: {display_names}")
+    print(f"SLURM JIDs: {[job.job_id for job in jobs]}")
+
+    # # ════════════════════════ plot cost vs acc ════════════════════════ #
+
+    # plot_args = get_default_cost_plot_args()
+
+    out_dir_name = f"vit_{common_args.dataset}_wip_hoyer"
+    output_dir = Path(os.environ["RESULTS_DIR"]) / out_dir_name
 
 
 if __name__ == '__main__':

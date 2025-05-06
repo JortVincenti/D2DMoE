@@ -30,3 +30,5 @@ shared/*
 local_output/stdout.txt
 D2DMoE/data/*
 data/*
+edm-cifar-image-net/*
+Images/*

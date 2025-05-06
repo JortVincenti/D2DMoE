@@ -25,8 +25,6 @@ from omegaconf import OmegaConf, DictConfig
 from tabulate import tabulate
 from torch import nn
 from triton import language as tl
-
-from data_utils.data import DATASETS_NAME_MAP
 from utils_var import arg_util
 
 # mixup code from:
@@ -251,7 +249,7 @@ def unfrozen_parameters(module: nn.Module) -> Iterator[nn.Parameter]:
 def find_module_names(model: nn.Module, filter: Callable[[nn.Module, nn.Module], bool]):
     found_names = []
     for name, module in model.named_modules():
-        if filter(model, module):
+        if filter(model, module) and 'dense' not in name:
             found_names.append(name)
     return found_names
 

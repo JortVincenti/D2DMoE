@@ -128,8 +128,6 @@ class FFN(nn.Module):
             return
        
         print(f"Pruning {n_remove} neurons out of {hidden_dim}.")
-        raise NotImplementedError('')
-
         self._prune_ffn_layer(keep_idx)
 
     def _prune_ffn_layer(self, keep_idx: torch.Tensor):
@@ -226,14 +224,11 @@ class SelfAttention(nn.Module):
             if using_flash or self.using_xform: scale_mul = scale_mul.transpose(1, 2)  # 1H11 to 11H1
             q = F.normalize(q, dim=-1).mul(scale_mul)
             k = F.normalize(k, dim=-1)
-        
-        #print('self.cached_k:', self.cached_k.sum() if self.cached_k is not None else 0)
-        #print('self.cached_v:', self.cached_v.sum() if self.cached_v is not None else 0)
+
         if self.caching:
             if self.cached_k is None: self.cached_k = k; self.cached_v = v
             else: k = self.cached_k = torch.cat((self.cached_k, k), dim=dim_cat); v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
-        
-        #print('q:', q.sum(), 'k:', k.sum(), 'v:', v.sum())
+
         dropout_p = self.attn_drop if self.training else 0.0
         if using_flash:
             oup = flash_attn_func(q.to(dtype=main_type), k.to(dtype=main_type), v.to(dtype=main_type), dropout_p=dropout_p, softmax_scale=self.scale).view(B, L, C)
@@ -241,8 +236,7 @@ class SelfAttention(nn.Module):
             oup = memory_efficient_attention(q.to(dtype=main_type), k.to(dtype=main_type), v.to(dtype=main_type), attn_bias=None if attn_bias is None else attn_bias.to(dtype=main_type).expand(B, self.num_heads, -1, -1), p=dropout_p, scale=self.scale).view(B, L, C)
         else:
             oup = slow_attn(query=q, key=k, value=v, scale=self.scale, attn_mask=attn_bias, dropout_p=dropout_p).transpose(1, 2).reshape(B, L, C)
-        
-        #print('oup:', oup.sum())
+
         return self.proj_drop(self.proj(oup))
         # attn = (q @ k.transpose(-2, -1)).add_(attn_bias + self.local_rpb())  # BHLc @ BHcL => BHLL
         # attn = self.attn_drop(attn.softmax(dim=-1))
@@ -276,59 +270,21 @@ class AdaLNSelfAttn(nn.Module):
             self.ada_lin = nn.Sequential(nn.SiLU(inplace=False), lin)
         
         self.fused_add_norm_fn = None
+        self.scale_switch = None
+        self.dense_blocks =None
     
     # NOTE: attn_bias is None during inference because kv cache is enabled
-    
     def forward(self, x, cond_BD, attn_bias):   # C: embed_dim, D: cond_dim
-        # print('x:', x.sum())
-        # print('cond_BD:', cond_BD.sum())
-        #global print_first
         if self.shared_aln:
             gamma1, gamma2, scale1, scale2, shift1, shift2 = (self.ada_gss + cond_BD).unbind(2) # 116C + B16C =unbind(2)=> 6 B1C
         else:
             gamma1, gamma2, scale1, scale2, shift1, shift2 = self.ada_lin(cond_BD).view(-1, 1, 6, self.C).unbind(2)
-        
-        # print("gamma1:", gamma1.sum())
-        # print("gamma2:", gamma2.sum())
-        # print("scale1:", scale1.sum())
-        # print("scale2:", scale2.sum())
-        # print("shift1:", shift1.sum())
-        # print("shift2:", shift2.sum())
-        # mean = x.mean(dim=-1, keepdim=True)
-        # var = x.var(dim=-1, unbiased=False, keepdim=True)
-        # print("Mean:", mean)
-        # print("Variance:", var)
-        # tmp = self.ln_wo_grad(x)
-        # print("ln_wo_grad(x):", tmp[0, :5])          # or .flatten()[:5]
-        # tmp.mul(scale1.add(1))
-        # tmp.add_(shift1)
-        # print("ln_wo_grad(x)*scale1+shift1 => attn input:", tmp[0, :5])
-        # out_attn = self.attn(tmp, attn_bias=attn_bias)
-        # print("attn_out (pre-gamma1):", out_attn[0, :5])
-        # out_attn.mul_(gamma1)
-        # print("attn_out (post-gamma1):", out_attn[0, :5])
-        # attn_input = self.ln_wo_grad(x)
-        # attn_input.mul_(scale1.add(1))
-        # attn_input.add_(shift1)
-        # print("attn_input:", attn_input.sum())
 
         x = x + self.drop_path(self.attn( self.ln_wo_grad(x).mul(scale1.add(1)).add_(shift1), attn_bias=attn_bias ).mul_(gamma1))
-        # if print_first:
-        #     print("x (post-attn):", x.sum())
-        #     print(self.ffn)
-        #     temp = self.ffn(self.ln_wo_grad(x).mul(scale2.add(1)).clone().add(shift2))
-        #     print('output ffn', temp.sum())
-        # Pre-compute the ffn input once (same as before)
         ffn_input = self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2)
         with record_function("FFN_Call_VAR"):
             ffn_output = self.ffn(ffn_input)
-
-        # Then complete the rest of the computation:
         x = x + self.drop_path(ffn_output.mul(gamma2))
-
-        # if print_first:
-        #     #print("x (post-ffn):", x.sum())
-        #     print_first = False
         
         return x
     
@@ -343,6 +299,6 @@ class AdaLNBeforeHead(nn.Module):
         self.ln_wo_grad = norm_layer(C, elementwise_affine=False)
         self.ada_lin = nn.Sequential(nn.SiLU(inplace=False), nn.Linear(D, 2*C))
     
-    def forward(self, x_BLC: torch.Tensor, cond_BD: torch.Tensor):
+    def forward(self, x_BLC: torch.Tensor, cond_BD: torch.Tensor):        
         scale, shift = self.ada_lin(cond_BD).view(-1, 1, 2, self.C).unbind(2)
         return self.ln_wo_grad(x_BLC).mul(scale.add(1)).add_(shift)

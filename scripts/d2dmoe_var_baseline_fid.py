@@ -5,26 +5,12 @@ from pathlib import Path
 import submitit
 
 from common import get_default_args
-from methods.avit import train as train_avit
 from methods.dynamic_sparsification.expert_split import train as dsti_expert_split
 from methods.dynamic_sparsification.rep_distill_train import train as mha_distill
 from methods.dynamic_sparsification.sparse_finetuning import train as sparse_finetune
-from methods.dynamic_sparsification.train_routers import train as dsti_train_routers
-from methods.early_exit import train as train_ee
-from methods.moefication.expert_split import train as split_moe
-from methods.moefication.relufication import train as relufication
-from methods.moefication.train_routers import train as train_routers
+from methods.dynamic_sparsification.eval_fid import train as eval_fid
 from train import train
 from utils import generate_run_name, submit_job
-#import utils
-from visualize.activation_sparsity import get_default_args as get_default_activation_sparsity_args
-from visualize.activation_sparsity import main as activation_sparsity_plot
-from visualize.cost_vs_plot import get_default_args as get_default_cost_plot_args
-from visualize.cost_vs_plot import main as cost_vs_plot
-from visualize.dsti_one_at_a_time import get_default_args as get_default_dsti_one_at_a_time_args
-from visualize.dsti_one_at_a_time import main as dsti_one_at_a_time_plot
-from visualize.moe_image_spatial_load import get_default_args as get_default_moe_image_spatial_load_args
-from visualize.moe_image_spatial_load import main as dsti_spatial_load_plot
 
 
 def load_env_variables(file_path):
@@ -54,7 +40,7 @@ def main():
     # partition = 'rtx3080'
     # partition = 'batch'
 
-    timeout = 60 #60 * 24 * 7
+    timeout = 30 #60 * 24 * 7
     # timeout = 60 * 24 * 2
 
     gpus_per_task = 1
@@ -204,12 +190,34 @@ def main():
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.1/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0_e32/final.pth',
-        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.1_e256/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.1_e128/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.01/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.001/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.0001/final.pth',
     ]
 
+
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.97683, 0.96107, 0.94351],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.94021, 0.93184, 0.86976],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.88711, 0.87674, 0.86387],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.81839, 0.81302, 0.78686],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.80367, 0.77874, 0.76559],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.8035,  0.68059, 0.67167],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.80365, 0.66774, 0.66175],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.80364, 0.63961, 0.63632],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.80647, 0.61086, 0.60793],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.80689, 0.61088, 0.47387],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.8,     0.6,     0.4    ],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.99, 0.99, 0.99],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.95, 0.95, 0.95],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.9, 0.9, 0.9],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.85, 0.85, 0.85],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.8, 0.8, 0.8],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.75, 0.75, 0.75],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.7, 0.7, 0.7],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.65, 0.65, 0.65],
+    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.6, 0.6, 0.6],
 
     # # ════════════════════════ dsti router training ════════════════════════ #
     # Jort HEre
@@ -217,22 +225,15 @@ def main():
     for base_on_exp_name in base_split_exp_names:
         for exp_id in exp_ids:
             for i in range(len(final_path_save)):
-                dsti_routing_args.dsti_tau_to_eval = [0.1, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-                #[
-                #    [1.0, 1.0, 1.0, 1.0, 1.0, 0.934, 0.923, 0.888, 0.886, 0.855],
-                    # [1.0, 1.0, 1.0, 1.0, 1.0, 0.972, 0.951, 0.938, 0.839, 0.794],
-                    # [1.0, 1.0, 1.0, 1.0, 1.0, 0.988, 0.976, 0.939, 0.898, 0.884],
-                    # [1.0, 1.0, 1.0, 1.0, 1.0, 0.966, 0.959, 0.873, 0.869, 0.711],
-                    # [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.939, 0.898, 0.884],
-                # ]
+                dsti_routing_args.dsti_tau_to_eval = [[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.4]] #0.78686
                 dsti_routing_args.batch_size_eff = 128
-                dsti_routing_args.dsti_tau_as_list = False
-                dsti_routing_args.use_router = False
+                dsti_routing_args.dsti_tau_as_list = True
+                dsti_routing_args.use_router = True
                 dsti_routing_args.fid = True
                 dsti_routing_args.debug = True
                 dsti_routing_args.final_path_save = final_path_save[i]
-                dsti_routing_args.expert_index_switch = 0
-                dsti_routing_args.model_experts_size = 256
+                dsti_routing_args.expert_index_switch = 9
+                dsti_routing_args.model_experts_size = 128
 
                 if dsti_routing_args.final_path_save == 'base_data_moe':
                     dsti_routing_args.activation = None
@@ -253,7 +254,7 @@ def main():
                 exp_name, run_name = generate_run_name(args)
                 base_run_name = f'{base_on_exp_name}_{exp_id}'
                 executor.update_parameters(slurm_additional_parameters={})
-                job = submit_job(executor, dsti_train_routers, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
+                job = submit_job(executor, eval_fid, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
                 jobs.append(job)
                 run_to_job_map[run_name] = job
         exp_names.append(exp_name)
@@ -265,14 +266,6 @@ def main():
     print(f"Exp names: {exp_names}")
     print(f"Display names: {display_names}")
     print(f"SLURM JIDs: {[job.job_id for job in jobs]}")
-
-    # # ════════════════════════ plot cost vs acc ════════════════════════ #
-
-    # plot_args = get_default_cost_plot_args()
-
-    out_dir_name = f"vit_{common_args.dataset}_wip_hoyer"
-    output_dir = Path(os.environ["RESULTS_DIR"]) / out_dir_name
-
 
 if __name__ == '__main__':
     main()

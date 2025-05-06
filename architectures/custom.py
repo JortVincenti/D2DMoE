@@ -3,7 +3,6 @@ import math
 import torch
 from torch import nn
 from architectures.basic_var import SelfAttention
-from architectures.gpt import CausalSelfAttention
 from utils import find_module_names, get_module_by_name, set_module_by_name, get_module_name, get_parent_module_name
 # import utils
 dropout_add_layer_norm = fused_mlp_func = memory_efficient_attention = flash_attn_func = None
@@ -174,28 +173,6 @@ def transcribe_mha_params(org_mha, simple_mha):
         simple_mha.v_proj.bias = torch.nn.Parameter(org_mha.in_proj_bias[2 * embed_dim:3 * embed_dim].clone().detach())
         simple_mha.o_proj.weight = torch.nn.Parameter(org_mha.out_proj.weight.clone().detach())
         simple_mha.o_proj.bias = torch.nn.Parameter(org_mha.out_proj.bias.clone().detach())
-    elif isinstance(org_mha, CausalSelfAttention):
-        assert org_mha.n_embd == simple_mha.embed_dim
-        assert org_mha.n_head == simple_mha.num_heads
-        assert org_mha.c_attn.bias is not None
-        assert org_mha.c_proj.bias is not None
-        assert org_mha.bias is not None # causal self-attention mask
-        embed_dim = org_mha.n_embd
-        simple_mha.register_buffer(
-            "causal_mask",
-            torch.tril(torch.ones(org_mha.bias.shape[-1], org_mha.bias.shape[-1])).view(
-                1, 1, org_mha.bias.shape[-1], org_mha.bias.shape[-1]
-            ),
-        )
-        simple_mha.q_proj.weight = torch.nn.Parameter(org_mha.c_attn.weight[:embed_dim].clone().detach())
-        simple_mha.q_proj.bias = torch.nn.Parameter(org_mha.c_attn.bias[:embed_dim].clone().detach())
-        simple_mha.k_proj.weight = torch.nn.Parameter(org_mha.c_attn.weight[embed_dim:2 * embed_dim].clone().detach())
-        simple_mha.k_proj.bias = torch.nn.Parameter(org_mha.c_attn.bias[embed_dim:2 * embed_dim].clone().detach())
-        simple_mha.v_proj.weight = torch.nn.Parameter(
-            org_mha.c_attn.weight[2 * embed_dim:3 * embed_dim].clone().detach())
-        simple_mha.v_proj.bias = torch.nn.Parameter(org_mha.c_attn.bias[2 * embed_dim:3 * embed_dim].clone().detach())
-        simple_mha.o_proj.weight = torch.nn.Parameter(org_mha.c_proj.weight.clone().detach())
-        simple_mha.o_proj.bias = torch.nn.Parameter(org_mha.c_proj.bias.clone().detach())
     elif isinstance(org_mha, SelfAttention):
         # 1) Extract references to the internal SelfAttention module
         sa = org_mha  # SelfAttention
@@ -248,16 +225,12 @@ def transcribe_mha_params(org_mha, simple_mha):
 
 
 def simplify_mha(model):
-    mhas_names = find_module_names(model, lambda _model, m: isinstance(m, (nn.MultiheadAttention, CausalSelfAttention, SelfAttention)))
+    mhas_names = find_module_names(model, lambda _model, m: isinstance(m, (nn.MultiheadAttention, SelfAttention)))
     for mha_name in mhas_names:
         org_mha = get_module_by_name(model, mha_name)
         if isinstance(org_mha, nn.MultiheadAttention):
             embed_dim = org_mha.embed_dim
             num_heads = org_mha.num_heads
-            dropout = org_mha.dropout
-        elif isinstance(org_mha, CausalSelfAttention):
-            embed_dim = org_mha.n_embd
-            num_heads = org_mha.n_head
             dropout = org_mha.dropout
         elif isinstance(org_mha, SelfAttention):
             embed_dim = org_mha.num_heads * org_mha.head_dim
@@ -270,16 +243,6 @@ def simplify_mha(model):
         transcribe_mha_params(org_mha, simple_mha)
         set_module_by_name(model, mha_name, simple_mha)
 
-# def create_attention_projection_filter_condition(projection_name: str = None):
-#     def filter_condition(model: nn.Module, m: nn.Module):
-#         m_name = get_module_name(model, m)
-#         parent_module = get_module_by_name(model, get_parent_module_name(m_name))
-#         if isinstance(m, nn.Linear) and isinstance(parent_module, CustomMultiheadAttention):
-#             if projection_name is not None and projection_name not in m_name:
-#                 return False
-#             return True
-
-#     return filter_condition
 
 def create_attention_projection_filter_condition(projection_name: str = None):
     def filter_condition(model: nn.Module, m: nn.Module):

@@ -21,6 +21,20 @@ class MoeFirstLayerImplementation(torch.autograd.Function):
             6400:  {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
             10816: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
             16384: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+
+            2*64:    {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*256:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*576:   {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*1024:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*1600:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*2304:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*4096:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+        
+            2*6400:  {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*10816: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*16384: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+
+            10880: {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
         },
 
         16: {
@@ -35,6 +49,18 @@ class MoeFirstLayerImplementation(torch.autograd.Function):
             6400:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
             10816: {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
             16384: {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+
+            2*64:    {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*256:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*576:   {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*1024:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*1600:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*2304:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*4096:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+        
+            2*6400:  {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*10816: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*16384: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
         },
 
         32: {
@@ -49,6 +75,18 @@ class MoeFirstLayerImplementation(torch.autograd.Function):
             6400:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
             10816: {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
             16384: {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 2, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+
+            2*64:    {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*256:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*576:   {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*1024:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*1600:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*2304:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*4096:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+        
+            2*6400:  {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*10816: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*16384: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
         },
 
         64: {
@@ -64,28 +102,30 @@ class MoeFirstLayerImplementation(torch.autograd.Function):
             10816: {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
             16384: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 2, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
 
-            6*64:    {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
-            6*256:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
-            6*576:   {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
-            6*1024:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
-            6*1600:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
-            6*2304:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
-            6*4096:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
-            
-            6*6400:  {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
-            6*10816: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
-            6*16384: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*64:    {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*256:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*576:   {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*1024:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*1600:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*2304:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*4096:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+    
+            2*6400:  {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*10816: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*16384: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
         },
 
         128: {
-            64:    {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            64:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*100: {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*169: {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
             256:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            512:   {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
             576:   {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
             1024:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
             1600:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
             2304:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
             4096:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
-            
             6400:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
             10816: {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
             16384: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 2, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
@@ -102,6 +142,8 @@ class MoeFirstLayerImplementation(torch.autograd.Function):
             4*6400:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
             4*10816: {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
             4*16384: {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+
+            16800: {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
         },
 
         256: {
@@ -131,22 +173,31 @@ class MoeFirstLayerImplementation(torch.autograd.Function):
             4*16384: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
         },
     }
-
+    @staticmethod
     def get_best_config(sample_dim: int, expert_dim: int):
         """
-        Return the best config from BEST_CONFIGS_FROM_LOGS using a simple threshold lookup.
-        If sample_dim is less than or equal to the smallest key, return that config.
-        Otherwise, iterate and return the first config where sample_dim is below the threshold.
-        If sample_dim is larger than any key, return the last config.
-        """
-        if expert_dim not in MoeFirstLayerImplementation.BEST_CONFIGS_FROM_LOGS:
-            raise ValueError(f"No configs found for expert_dim={expert_dim}")
+        Return the best config for (sample_dim, expert_dim).
 
-        expert_configs = MoeFirstLayerImplementation.BEST_CONFIGS_FROM_LOGS[expert_dim]
-        if sample_dim not in expert_configs:
-            raise ValueError(f"No config found for sample_dim={sample_dim} under expert_dim={expert_dim}")
-        
-        return expert_configs[sample_dim]
+        * If there's an exact match for `sample_dim`, return it.
+        * Otherwise, return the config whose key is the closest to `sample_dim`
+        (in absolute difference).  In a tie, the smaller key wins.
+        """
+        try:
+            expert_configs = MoeFirstLayerImplementation.BEST_CONFIGS_FROM_LOGS[expert_dim]
+        except KeyError as exc:
+            raise ValueError(f"No configs found for expert_dim={expert_dim}") from exc
+
+        # Fast path – exact hit
+        if sample_dim in expert_configs:
+            return expert_configs[sample_dim]
+
+        # Compute the key with minimum |k - sample_dim|
+        closest_key = min(
+            expert_configs.keys(),
+            key=lambda k: (abs(k - sample_dim), k)   # (distance, key) => tie-break on smaller key
+        )
+        return expert_configs[closest_key]
+
 
     
     @staticmethod
@@ -193,7 +244,6 @@ class MoeFirstLayerImplementation(torch.autograd.Function):
         grid = lambda META: (triton.cdiv(sample_dim, META['BLOCK_SIZE_BD']) *
                              triton.cdiv(expert_dim, META['BLOCK_SIZE_ED']),
                              num_experts)
-
 
         moe_first_kernel[grid](
             # All positional arguments first
@@ -375,6 +425,20 @@ class MoeSecondLayerAtomicImplementation(torch.autograd.Function):
             6400:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 2, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
             10816: {'BLOCK_SIZE_BD': 32,'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
             16384: {'BLOCK_SIZE_BD': 32,'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+
+            2*64:    {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*256:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*576:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*1024:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*1600:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*2304:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*4096:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+
+            2*6400:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*10816: {'BLOCK_SIZE_BD': 32,'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*16384: {'BLOCK_SIZE_BD': 32,'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+
+            10880: {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
         },
 
         16: {
@@ -389,6 +453,18 @@ class MoeSecondLayerAtomicImplementation(torch.autograd.Function):
             6400:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
             10816: {'BLOCK_SIZE_BD': 32,'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 2, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
             16384: {'BLOCK_SIZE_BD': 32,'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+
+            2*64:    {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*256:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*576:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*1024:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*1600:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*2304:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*4096:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+
+            2*6400:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*10816: {'BLOCK_SIZE_BD': 32,'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*16384: {'BLOCK_SIZE_BD': 32,'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
         },
 
         32: {
@@ -403,6 +479,17 @@ class MoeSecondLayerAtomicImplementation(torch.autograd.Function):
             6400:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 32,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
             10816: {'BLOCK_SIZE_BD': 32,'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 2, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
             16384: {'BLOCK_SIZE_BD': 32,'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+
+            2*64:    {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*256:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*576:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*1024:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*1600:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*2304:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*4096:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*6400:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*10816: {'BLOCK_SIZE_BD': 32,'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*16384: {'BLOCK_SIZE_BD': 32,'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
         },
 
         64: {
@@ -418,22 +505,25 @@ class MoeSecondLayerAtomicImplementation(torch.autograd.Function):
             10816: {'BLOCK_SIZE_BD': 32,'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
             16384: {'BLOCK_SIZE_BD': 32,'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
 
-            4*64:    {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
-            4*256:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
-            4*576:   {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
-            4*1024:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
-            4*1600:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
-            4*2304:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
-            4*4096:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*64:    {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*256:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*576:   {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*1024:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*1600:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*2304:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR','num_stages': 4, 'num_warps': 4},
+            2*4096:  {'BLOCK_SIZE_BD': 64, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
             
-            4*6400:  {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
-            4*10816: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
-            4*16384: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*6400:  {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*10816: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*16384: {'BLOCK_SIZE_BD': 128, 'BLOCK_SIZE_HD': 32,  'BLOCK_SIZE_ED': 64, 'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
         },
 
         128: {
             64:    {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
             256:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*100:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            2*169:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_HD': 32, 'BLOCK_SIZE_ED': 32, 'GROUP_SIZE_BD': 1, 'ORDERING': 'COLUMN_MAJOR',   'num_stages': 4, 'num_warps': 4},
+            512:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
             576:   {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
             1024:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
             1600:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
@@ -456,6 +546,8 @@ class MoeSecondLayerAtomicImplementation(torch.autograd.Function):
             4*6400:  {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
             4*10816: {'BLOCK_SIZE_BD': 32,'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
             4*16384: {'BLOCK_SIZE_BD': 32,'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
+
+            16800: {'BLOCK_SIZE_BD': 32, 'BLOCK_SIZE_ED': 32, 'BLOCK_SIZE_HD': 64,  'GROUP_SIZE_BD': 1, 'ORDERING': 'ROW_MAJOR','num_stages': 4, 'num_warps': 4},
         },
 
         256: {
@@ -488,19 +580,27 @@ class MoeSecondLayerAtomicImplementation(torch.autograd.Function):
     @staticmethod
     def get_best_config(sample_dim: int, expert_dim: int):
         """
-        Return the best config from BEST_CONFIGS_FROM_LOGS using a simple threshold lookup.
-        If sample_dim is less than or equal to the smallest key, return that config.
-        Otherwise, iterate and return the first config where sample_dim is below the threshold.
-        If sample_dim is larger than any key, return the last config.
-        """
-        if expert_dim not in MoeSecondLayerAtomicImplementation.BEST_CONFIGS_SECOND:
-            raise ValueError(f"No configs found for expert_dim={expert_dim}")
+        Return the best config for (sample_dim, expert_dim).
 
-        expert_configs = MoeSecondLayerAtomicImplementation.BEST_CONFIGS_SECOND[expert_dim]
-        if sample_dim not in expert_configs:
-            raise ValueError(f"No config found for sample_dim={sample_dim} under expert_dim={expert_dim}")
-        
-        return expert_configs[sample_dim]
+        * If there's an exact match for `sample_dim`, return it.
+        * Otherwise, return the config whose key is the closest to `sample_dim`
+        (in absolute difference).  In a tie, the smaller key wins.
+        """
+        try:
+            expert_configs = MoeSecondLayerAtomicImplementation.BEST_CONFIGS_SECOND[expert_dim]
+        except KeyError as exc:
+            raise ValueError(f"No configs found for expert_dim={expert_dim}") from exc
+
+        # Fast path – exact hit
+        if sample_dim in expert_configs:
+            return expert_configs[sample_dim]
+
+        # Compute the key with minimum |k - sample_dim|
+        closest_key = min(
+            expert_configs.keys(),
+            key=lambda k: (abs(k - sample_dim), k)   # (distance, key) => tie-break on smaller key
+        )
+        return expert_configs[closest_key]
 
 
     @staticmethod

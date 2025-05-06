@@ -23,7 +23,6 @@ from omegaconf import OmegaConf
 from torchvision import datasets
 from torch.utils.tensorboard import SummaryWriter
 from common import INIT_NAME_MAP, LOSS_NAME_MAP, OPTIMIZER_NAME_MAP, SCHEDULER_NAME_MAP, get_default_args
-from data_utils.data import DATASETS_NAME_MAP
 from eval import benchmark, test_classification
 from utils import (
     Mixup,

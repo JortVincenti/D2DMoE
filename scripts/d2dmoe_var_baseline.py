@@ -5,26 +5,12 @@ from pathlib import Path
 import submitit
 
 from common import get_default_args
-from methods.avit import train as train_avit
 from methods.dynamic_sparsification.expert_split import train as dsti_expert_split
 from methods.dynamic_sparsification.rep_distill_train import train as mha_distill
 from methods.dynamic_sparsification.sparse_finetuning import train as sparse_finetune
 from methods.dynamic_sparsification.train_routers import train as dsti_train_routers
-from methods.early_exit import train as train_ee
-from methods.moefication.expert_split import train as split_moe
-from methods.moefication.relufication import train as relufication
-from methods.moefication.train_routers import train as train_routers
 from train import train
 from utils import generate_run_name, submit_job
-#import utils
-from visualize.activation_sparsity import get_default_args as get_default_activation_sparsity_args
-from visualize.activation_sparsity import main as activation_sparsity_plot
-from visualize.cost_vs_plot import get_default_args as get_default_cost_plot_args
-from visualize.cost_vs_plot import main as cost_vs_plot
-from visualize.dsti_one_at_a_time import get_default_args as get_default_dsti_one_at_a_time_args
-from visualize.dsti_one_at_a_time import main as dsti_one_at_a_time_plot
-from visualize.moe_image_spatial_load import get_default_args as get_default_moe_image_spatial_load_args
-from visualize.moe_image_spatial_load import main as dsti_spatial_load_plot
 
 
 def load_env_variables(file_path):
@@ -54,7 +40,7 @@ def main():
     # partition = 'rtx3080'
     # partition = 'batch'
 
-    timeout = 10 #60 * 24 * 7
+    timeout = 24*60 #60 * 24 * 7
     # timeout = 60 * 24 * 2
 
     gpus_per_task = 1
@@ -140,10 +126,10 @@ def main():
         exp_name, run_name = generate_run_name(args)
         args.base_on = exp_name
         base_run_name = f'{exp_id}'
-        executor.update_parameters(slurm_additional_parameters={})
-        job = submit_job(executor, dsti_expert_split, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
-        jobs.append(job)
-        run_to_job_map[run_name] = job
+        # executor.update_parameters(slurm_additional_parameters={})
+        # job = submit_job(executor, dsti_expert_split, args, num_gpus=dsti_gpus_per_task, gpu_type=gpu_type)
+        # jobs.append(job)
+        # run_to_job_map[run_name] = job
 
     exp_names.append(exp_name)
     base_split_exp_names.append(exp_names[-1])
@@ -190,7 +176,7 @@ def main():
     dsti_routing_args.mixed_precision = None
     dsti_routing_args.fid = False
     dsti_routing_args.debug = False
-    dsti_routing_args.use_router = True
+    dsti_routing_args.use_router = False
     #dsti_routing_args.mixed_precision = 'bf16'
     # Include Sparsity or not
 
@@ -213,7 +199,7 @@ def main():
 
     path_file_moe = [
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0/final.pth',
-        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.1/final.pth',
+        '/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.1_e128/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.01/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.001/final.pth',
         #'/home/jvincenti/D2DMoE/shared/results/effbench_runs/relu_moe_0.0001/final.pth',

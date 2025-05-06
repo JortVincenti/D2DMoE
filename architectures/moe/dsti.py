@@ -5,13 +5,8 @@ from typing import List, Optional, Callable, Union
 import torch
 from torch import nn
 from torchvision.ops import MLP as TorchvisionMLP
-from transformers.models.bert import BertLayer
 from transformers.activations import PytorchGELUTanh
-from transformers.models.gemma.modeling_gemma import GemmaMLP
-
 from architectures.custom import create_attention_projection_filter_condition, CustomMultiheadAttention
-from architectures.vit import MLP
-from architectures.gpt import MLP as GPTMLP, GPT
 from utils import find_module_names, get_module_by_name, set_module_by_name, get_module_name, get_parent_module_name
 from architectures.basic_var import SelfAttention, FFN
 
@@ -106,12 +101,8 @@ def replace_mha_projections(original_model: nn.Module,
                             ):
     original_model.eval()
 
-    print(original_model)
-    if isinstance(original_model, GPT):
-        d = original_model.config.n_embd
-    else:
-        # d = original_model.hidden_dim #Jort: this is not correct
-        d = original_model.C
+
+    d = original_model.C
 
     attention_dim = round(flops_factor * (d ** 2 + d) / (2 * d + 1))
     if dropout == 'same':
@@ -166,7 +157,7 @@ def replace_mha_projections(original_model: nn.Module,
 
 
 def dsti_mlp_filter_condition(_model: nn.Module, m: nn.Module):
-    if isinstance(m, (MLP, TorchvisionMLP, SubstitutionMLP, GPTMLP, BertLayer, GemmaMLP, FFN)):
+    if isinstance(m, (TorchvisionMLP, SubstitutionMLP, FFN)):
         return True
 
 
@@ -175,7 +166,7 @@ def eligible_gelu_activation_filter(model: nn.Module, m: nn.Module):
     m_name = get_module_name(model, m)
     parent_module = get_module_by_name(model, get_parent_module_name(m_name))
     if isinstance(m, (nn.GELU, PytorchGELUTanh)) and isinstance(parent_module, (
-    MLP, TorchvisionMLP, SubstitutionMLP, GPTMLP, BertLayer, GemmaMLP, FFN)):
+    TorchvisionMLP, SubstitutionMLP, FFN)):
         return True
 
 
@@ -185,13 +176,8 @@ def mha_gelu_activation_filter(model: nn.Module, m: nn.Module):
     grandparent_m_name = get_parent_module_name(parent_m_name)
     parent_module = get_module_by_name(model, parent_m_name)
     grandparent_module = get_module_by_name(model, grandparent_m_name)
-    # print("*"*50)
-    # print(f"m_name: {m_name}, parent_m_name: {parent_m_name}, grandparent_m_name: {grandparent_m_name}")
-    # print(f"m: {m}, parent_module: {parent_module}, grandparent_module: {grandparent_module}")
-    # print(isinstance(m, (nn.GELU, PytorchGELUTanh)), isinstance(parent_module, (MLP, TorchvisionMLP, SubstitutionMLP, GPTMLP, BertLayer, GemmaMLP)), isinstance(grandparent_module, (CustomMultiheadAttention, SelfAttention))) 
-    # print("*"*50)
-    if isinstance(m, (nn.GELU, PytorchGELUTanh)) and isinstance(parent_module, (
-    MLP, TorchvisionMLP, SubstitutionMLP, GPTMLP, BertLayer, GemmaMLP)) \
+
+    if isinstance(m, (nn.GELU, PytorchGELUTanh)) and isinstance(parent_module, (TorchvisionMLP, SubstitutionMLP)) \
             and isinstance(grandparent_module, (CustomMultiheadAttention, SelfAttention)): # Jort: To make sure that SelfAttention can be added instead of CustomMultiheadAttention
         return True
 

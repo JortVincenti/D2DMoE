@@ -33,7 +33,7 @@ class Args(Tap):
     vfast: int = 0      # torch.compile VAE; =0: not compile; 1: compile with 'reduce-overhead'; 2: compile with 'max-autotune'
     # VAR
     tfast: int = 0      # torch.compile VAR; =0: not compile; 1: compile with 'reduce-overhead'; 2: compile with 'max-autotune'
-    depth: int = 16     # VAR depth
+    depth: int = 24     # VAR depth
     # VAR initialization
     ini: float = -1     # -1: automated model parameter initialization
     hd: float = 0.02    # head.w *= hd
@@ -48,7 +48,7 @@ class Args(Tap):
     tclip: float = 2.       # <=0 for not using grad clip
     ls: float = 0.0         # label smooth
     
-    bs: int = 16 #768           # global batch size
+    bs: int = 128 #768           # global batch size
     batch_size: int = 0     # [automatically set; don't specify this] batch size per GPU = round(args.bs / args.ac / dist.get_world_size() / 8) * 8
     glb_batch_size: int = 0 # [automatically set; don't specify this] global batch size = args.batch_size * dist.get_world_size()
     ac: int = 1             # gradient accumulation

@@ -12,6 +12,7 @@ from architectures.helpers import gumbel_softmax_with_rng, sample_with_top_k_top
 from architectures.vqvae import VQVAE, VectorQuantizer2
 import numpy as np
 import pickle
+import copy
 
 class SharedAdaLin(nn.Linear):
     def forward(self, cond_BD):
@@ -117,14 +118,124 @@ class VAR(nn.Module):
         self.head_nm = AdaLNBeforeHead(self.C, self.D, norm_layer=norm_layer)
         self.head = nn.Linear(self.C, self.V)
     
-    def get_logits(self, h_or_h_and_residual: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], cond_BD: Optional[torch.Tensor]):
-        if not isinstance(h_or_h_and_residual, torch.Tensor):
-            h, resi = h_or_h_and_residual   # fused_add_norm must be used
-            h = resi + self.blocks[-1].drop_path(h)
-        else:                               # fused_add_norm is not used
-            h = h_or_h_and_residual
-        return self.head(self.head_nm(h.float(), cond_BD).float()).float()
+    def get_logits(self, h_or_h_and_residual: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], cond_BD: Optional[torch.Tensor], current_scale=None):
+        if current_scale is not None and self.blocks[-1].dense_blocks and current_scale < self.blocks[-1].scale_switch:
+            if not isinstance(h_or_h_and_residual, torch.Tensor):
+                h, resi = h_or_h_and_residual   # fused_add_norm must be used
+                h = resi + self.blocks[-1].dense_blocks.drop_path(h)
+            else:                               # fused_add_norm is not used
+                h = h_or_h_and_residual
+            return self.head_dense(self.head_nm_dense(h.float(), cond_BD).float()).float()
+        else:
+            if not isinstance(h_or_h_and_residual, torch.Tensor):
+                h, resi = h_or_h_and_residual   # fused_add_norm must be used
+                h = resi + self.blocks[-1].drop_path(h)
+            else:                               # fused_add_norm is not used
+                h = h_or_h_and_residual
+            return self.head(self.head_nm(h.float(), cond_BD).float()).float()
     
+    def set_dense_module(self, scale_switch=0):
+        for b in self.blocks:
+            b.scale_switch=scale_switch
+            b.dense_blocks = copy.deepcopy(b)
+        self.head_nm_dense = copy.deepcopy(self.head_nm)
+        self.head_dense = copy.deepcopy(self.head)
+
+
+    @torch.no_grad()
+    def autoregressive_infer_cfg_pruning(
+        self, B: int, label_B: Optional[Union[int, torch.LongTensor]],
+        g_seed: Optional[int] = None, cfg=1.5, top_k=0, top_p=0.0,
+        more_smooth=False, rng=0, prune_from_stage=0, pct_remove=0
+    ) -> torch.Tensor:
+        """
+        Inference method for autoregressive mode, collecting activations per scale.
+        """
+        def _toggle_ffn_pruning(blocks, use_pruned: bool, pct_remove: float = 0.10):
+            for b in blocks:
+                attr_name = "ffn" if hasattr(b, "ffn") else (
+                            "mlp" if hasattr(b, "mlp") else None)
+                if attr_name is None:
+                    continue
+
+                full_ffn = getattr(b, attr_name)
+
+                # Cache the untouched full FFN exactly once
+                if not hasattr(b, "_ffn_full"):
+                    b._ffn_full = full_ffn
+
+                # ------------------------------------------------------------------
+                # Only when we *first* need the pruned copy (use_pruned == True)
+                # AND we haven't built it yet, clone + prune.
+                # ------------------------------------------------------------------
+                if use_pruned and not hasattr(b, "_ffn_pruned"):
+                    pruned = copy.deepcopy(full_ffn)          # stats copied over
+                    pruned.prune_by_least_impact(pct_remove)  # <-- will now succeed
+                    b._ffn_pruned = pruned
+
+                # Pointer switch
+                setattr(b, attr_name,
+                        b._ffn_pruned if use_pruned else b._ffn_full)
+
+        if label_B is None:
+            label_B = torch.multinomial(self.uniform_prob, num_samples=B, replacement=True, generator=rng).reshape(B)
+        elif isinstance(label_B, int):
+            label_B = torch.full((B,), fill_value=self.num_classes if label_B < 0 else label_B, device=self.lvl_1L.device)
+
+        sos = cond_BD = self.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.num_classes)), dim=0))
+        lvl_pos = self.lvl_embed(self.lvl_1L) + self.pos_1LC
+        next_token_map = sos.unsqueeze(1).expand(2 * B, self.first_l, -1) + self.pos_start.expand(2 * B, self.first_l, -1) + lvl_pos[:, :self.first_l]
+
+        cur_L = 0
+        f_hat = sos.new_zeros(B, self.Cvae, self.patch_nums[-1], self.patch_nums[-1])
+
+        for b in self.blocks:
+            b.attn.kv_caching(True)
+
+        for si, pn in enumerate(self.patch_nums):  # si: i-th segment
+            ratio = si / self.num_stages_minus_1
+            _toggle_ffn_pruning(self.blocks, use_pruned = (si >= prune_from_stage), pct_remove=pct_remove)
+            cur_L += pn * pn
+
+            # Forward pass for the current scale
+            cond_BD_or_gss = self.shared_ada_lin(cond_BD)
+            x = next_token_map
+
+            for b in self.blocks:
+                x = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
+
+            logits_BlV = self.get_logits(x, cond_BD)
+            t = cfg * ratio
+            logits_BlV = (1 + t) * logits_BlV[:B] - t * logits_BlV[B:]
+          
+            idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
+
+
+            if not more_smooth:  # default case
+                h_BChw = self.vae_quant_proxy[0].embedding(idx_Bl)
+            else:
+                gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)
+                h_BChw = gumbel_softmax_with_rng(logits_BlV.mul(1 + ratio),
+                                                tau=gum_t, hard=False, dim=-1, rng=rng) @ \
+                        self.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
+
+            h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, pn, pn)
+            f_hat, next_token_map = self.vae_quant_proxy[0].get_next_autoregressive_input(
+                si, len(self.patch_nums), f_hat, h_BChw)
+
+
+            if si != self.num_stages_minus_1:
+                next_token_map = next_token_map.view(B, self.Cvae, -1).transpose(1, 2)
+                next_token_map = self.word_embed(next_token_map) + lvl_pos[:, cur_L:cur_L + self.patch_nums[si + 1] ** 2]
+                next_token_map = next_token_map.repeat(2, 1, 1)  # double the batch sizes due to CFG
+
+        for b in self.blocks:
+            b.attn.kv_caching(False)
+
+        _toggle_ffn_pruning(self.blocks, use_pruned=False) 
+
+        return self.vae_proxy[0].fhat_to_img(f_hat).add_(1).mul_(0.5)
+
     @torch.no_grad()
     def autoregressive_infer_cfg(
         self, B: int, label_B: Optional[Union[int, torch.LongTensor]],

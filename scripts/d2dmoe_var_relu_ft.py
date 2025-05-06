@@ -1,30 +1,14 @@
 import os
 from copy import deepcopy
 from pathlib import Path
-
 import submitit
-
 from common import get_default_args
-from methods.avit import train as train_avit
 from methods.dynamic_sparsification.expert_split import train as dsti_expert_split
 from methods.dynamic_sparsification.rep_distill_train import train as mha_distill
 from methods.dynamic_sparsification.sparse_finetuning import train as sparse_finetune
 from methods.dynamic_sparsification.train_routers import train as dsti_train_routers
-from methods.early_exit import train as train_ee
-from methods.moefication.expert_split import train as split_moe
-from methods.moefication.relufication import train as relufication
-from methods.moefication.train_routers import train as train_routers
 from train import train
 from utils import generate_run_name, submit_job
-#import utils
-from visualize.activation_sparsity import get_default_args as get_default_activation_sparsity_args
-from visualize.activation_sparsity import main as activation_sparsity_plot
-from visualize.cost_vs_plot import get_default_args as get_default_cost_plot_args
-from visualize.cost_vs_plot import main as cost_vs_plot
-from visualize.dsti_one_at_a_time import get_default_args as get_default_dsti_one_at_a_time_args
-from visualize.dsti_one_at_a_time import main as dsti_one_at_a_time_plot
-from visualize.moe_image_spatial_load import get_default_args as get_default_moe_image_spatial_load_args
-from visualize.moe_image_spatial_load import main as dsti_spatial_load_plot
 
 
 def load_env_variables(file_path):
@@ -150,7 +134,7 @@ def main():
     # distillation_args.epochs = 1
     # distillation_args.epochs = 0
     # distillation_args.epochs = 0.1
-    distillation_args.batch_size = 128
+    distillation_args.batch_size = 64
     # distillation_args.batch_size = 64
     distillation_args.dsti_distill_loss_type = 'mse'
     distillation_args.eval_points = 0
@@ -196,7 +180,7 @@ def main():
     sparsity_enforcement_args.dsti_enforce_mode = 'relu_hoyer'
     sparsity_enforcement_args.dsti_clamp_displacement = -10.0
     # sparsity_enforcement_args.dsti_enforce_weight = 5e-1
-    dsti_enforce_weight = [0, 1e-1, 1e-2, 1e-3, 1e-4] #, 1e-3, 1e-4] #[0, 2e-1, 1e-1, 5e-2, 1e-2, 5e-3, 1e-3, 2e-4] 
+    dsti_enforce_weight = [1e-4] #, 1e-3, 1e-4] #[0, 2e-1, 1e-1, 5e-2, 1e-2, 5e-3, 1e-3, 2e-4] 
     # sparsity_enforcement_args.dsti_enforce_weight = 1e-1
     # sparsity_enforcement_args.dsti_enforce_weight = 5e-2
     # sparsity_enforcement_args.dsti_enforce_weight = 1e-2
@@ -224,8 +208,8 @@ def main():
     # sparsity_enforcement_args.scheduler_args.eta_min = 1e-5
     # sparsity_enforcement_args.scheduler_args.eta_min = 2e-6
     #
-    sparsity_enforcement_args.final_path_save = 'relu_sparse_ft'
-    sparsity_enforcement_args.mixed_precision = None
+    sparsity_enforcement_args.final_path_save = 'relu_sparse_ft_d24'
+    sparsity_enforcement_args.mixed_precision = 'bf16'
     #sparsity_enforcement_args.mixed_precision = 'bf16'
     sparsity_enforcement_args.path_file_ft = 'shared/results/effbench_runs/relu_sparse_ft_0/final.pth'
 
