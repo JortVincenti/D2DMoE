@@ -25,6 +25,7 @@ Thumbs.db
 *.pth
 *.npz
 
+
 D2DMoE/shared/*
 shared/*
 local_output/stdout.txt
@@ -32,3 +33,4 @@ D2DMoE/data/*
 data/*
 edm-cifar-image-net/*
 Images/*
+CUDA_Profile_tensorboard/*
